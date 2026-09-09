@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   BookmarkSimple,
   Copy,
   Highlighter,
@@ -15,10 +16,22 @@ import {
   Trash,
   X,
 } from '@phosphor-icons/react'
-import { toAppError, type AnnotationRecord, type BookmarkRecord } from '@deepread/shared'
+import { convertFileSrc } from '@tauri-apps/api/core'
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
+import {
+  toAppError,
+  type AnnotationRecord,
+  type BookmarkRecord,
+  type DictionaryMeta,
+} from '@deepread/shared'
 import type { ReaderTheme, TocItem } from '@deepread/reader-core'
 import {
+  buildIndex,
   FoliateAdapter,
+  inflateGzip,
+  lookupWord,
+  sanitizeDefinitionHtml,
+  type DefinitionField,
   type EngineCallbacks,
   type EngineSelection,
 } from '@deepread/reader-adapter'
@@ -137,6 +150,17 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     [],
   )
   const [searchState, setSearchState] = useState<'idle' | 'searching' | 'done'>('idle')
+  const [dictionaries, setDictionaries] = useState<readonly DictionaryMeta[]>([])
+  const [lookup, setLookup] = useState<{
+    word: string
+    rect: { top: number; left: number }
+    results: readonly { dictName: string; word: string; fields: readonly DefinitionField[] }[]
+  } | null>(null)
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const [panelProblem, setPanelProblem] = useState<string | null>(null)
+  const dictCacheRef = useRef(
+    new Map<string, { entries: ReturnType<typeof buildIndex>; dict: Uint8Array }>(),
+  )
 
   useEffect(() => {
     annotationsRef.current = annotations
@@ -207,6 +231,15 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
       },
     }
   })
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    invokeCommand('dictionary.list', undefined)
+      .then((response) => setDictionaries(response.dictionaries))
+      .catch(() => {
+        // Lookup is optional; the panel's import button retries the list.
+      })
+  }, [])
 
   useEffect(() => {
     const adapter = new FoliateAdapter(hostRef.current ?? document.body, {
@@ -403,6 +436,82 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     setSelection(null)
   }
 
+  const isGzip = (data: Uint8Array): boolean => data[0] === 0x1f && data[1] === 0x8b
+
+  const fetchBuffer = async (path: string): Promise<Uint8Array> => {
+    const response = await fetch(convertFileSrc(path))
+    if (!response.ok) throw new Error(`无法读取 ${path}`)
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  const loadDictionary = async (
+    meta: DictionaryMeta,
+  ): Promise<{ entries: ReturnType<typeof buildIndex>; dict: Uint8Array }> => {
+    const cached = dictCacheRef.current.get(meta.id)
+    if (cached) return cached
+    let idx = await fetchBuffer(meta.idxPath)
+    let dict = await fetchBuffer(meta.dictPath)
+    if (isGzip(idx)) idx = await inflateGzip(idx)
+    if (isGzip(dict)) dict = await inflateGzip(dict)
+    const loaded = { entries: buildIndex(idx), dict }
+    dictCacheRef.current.set(meta.id, loaded)
+    return loaded
+  }
+
+  const importDictionary = useCallback(async (): Promise<void> => {
+    const path = await openFileDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'StarDict 词典', extensions: ['ifo'] }],
+    })
+    if (!path) return
+    try {
+      await invokeCommand('dictionary.register', { path })
+      const response = await invokeCommand('dictionary.list', undefined)
+      setDictionaries(response.dictionaries)
+      setPanelProblem(null)
+    } catch (registerError) {
+      setPanelProblem(toAppError(registerError).message ?? null)
+    }
+  }, [])
+
+  const removeDictionary = useCallback(async (id: string): Promise<void> => {
+    try {
+      await invokeCommand('dictionary.remove', { id })
+      setDictionaries((current) => current.filter((d) => d.id !== id))
+      dictCacheRef.current.delete(id)
+      setPanelProblem(null)
+    } catch (removeError) {
+      setPanelProblem(toAppError(removeError).message ?? null)
+    }
+  }, [])
+
+  const runLookup = async (): Promise<void> => {
+    if (!selection) return
+    const word = selection.text
+      .trim()
+      .replace(/^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$/g, '')
+      .slice(0, 40)
+    const rect = { top: selection.rect.top, left: selection.rect.left }
+    setSelection(null)
+    if (!word) return
+    setLookupLoading(true)
+    setLookup({ word, rect, results: [] })
+    const results: { dictName: string; word: string; fields: readonly DefinitionField[] }[] = []
+    for (const meta of dictionaries) {
+      try {
+        const loaded = await loadDictionary(meta)
+        for (const result of lookupWord(loaded.entries, loaded.dict, word, meta.sametypesequence)) {
+          results.push({ dictName: meta.name, ...result })
+        }
+      } catch {
+        // One unreadable dictionary must not break lookup for the rest.
+      }
+    }
+    setLookup({ word, rect, results })
+    setLookupLoading(false)
+  }
+
   const toggleBookmark = (): void => {
     const current = progressRef.current
     if (!current) return
@@ -584,6 +693,35 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
               ))}
             </div>
           </div>
+          {panelProblem !== null && (
+            <p className="lookup-empty" role="alert">
+              {panelProblem}
+            </p>
+          )}
+          {dictionaries.length > 0 && <p className="settings-label">词典</p>}
+          {dictionaries.map((dictionary) => (
+            <div key={dictionary.id} className="settings-row dictionary-row">
+              <span className="settings-label">
+                {dictionary.name} · {dictionary.wordCount}
+              </span>
+              <button
+                type="button"
+                className="chrome-button"
+                onClick={() => void removeDictionary(dictionary.id)}
+                title="移除词典"
+              >
+                <X size={12} weight="regular" aria-hidden />
+              </button>
+            </div>
+          ))}
+          <div className="settings-row">
+            <span className="settings-label">导入词典</span>
+            <div className="segmented">
+              <button type="button" onClick={() => void importDictionary()}>
+                选择 .ifo
+              </button>
+            </div>
+          </div>
           <div className="settings-row">
             <span className="settings-label">方式</span>
             <div className="segmented">
@@ -716,6 +854,60 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           <button type="button" onClick={() => void addHighlight()} title="划线">
             <Highlighter size={16} weight="regular" aria-hidden />
           </button>
+          {selection.text.trim().length <= 40 && (
+            <button type="button" onClick={() => void runLookup()} title="查词典">
+              <BookOpen size={16} weight="regular" aria-hidden />
+            </button>
+          )}
+        </div>
+      )}
+
+      {(lookupLoading || lookup !== null) && (
+        <div
+          className="lookup-card"
+          style={{
+            top: Math.min(
+              Math.max(64, (lookup?.rect.top ?? selection?.rect.top ?? 100) - 12),
+              window.innerHeight - 260,
+            ),
+            left: Math.max(12, Math.min(lookup?.rect.left ?? 100, window.innerWidth - 320)),
+          }}
+        >
+          <div className="lookup-head">
+            <strong>{lookup?.word ?? '查询中…'}</strong>
+            <button
+              type="button"
+              className="chrome-button"
+              onClick={() => setLookup(null)}
+              title="关闭"
+            >
+              <X size={12} weight="regular" aria-hidden />
+            </button>
+          </div>
+          {lookupLoading && <p className="lookup-empty">查询中…</p>}
+          {lookup !== null && lookup.results.length === 0 && !lookupLoading && (
+            <p className="lookup-empty">词典中没有这个词条。</p>
+          )}
+          {lookup?.results.map((result, index) => (
+            <div key={`${result.dictName}-${index}`} className="lookup-entry">
+              <p className="lookup-dict">{result.dictName}</p>
+              {result.fields.map((field, fieldIndex) =>
+                field.type === 'html' ? (
+                  <div
+                    key={fieldIndex}
+                    className="lookup-def"
+                    dangerouslySetInnerHTML={{
+                      __html: sanitizeDefinitionHtml(field.content, new DOMParser()),
+                    }}
+                  />
+                ) : (
+                  <div key={fieldIndex} className="lookup-def">
+                    {field.content}
+                  </div>
+                ),
+              )}
+            </div>
+          ))}
         </div>
       )}
 

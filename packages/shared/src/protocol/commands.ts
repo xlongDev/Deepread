@@ -19,6 +19,9 @@ export const COMMAND = {
   libraryList: 'library.list',
   libraryImport: 'library.import',
   libraryRemove: 'library.remove',
+  dictionaryList: 'dictionary.list',
+  dictionaryRegister: 'dictionary.register',
+  dictionaryRemove: 'dictionary.remove',
 } as const
 
 export interface SystemPingRequest {
@@ -97,6 +100,37 @@ export interface LibraryRemoveResponse {
   readonly removed: boolean
 }
 
+/** A registered StarDict dictionary (files stay at their original location). */
+export interface DictionaryMeta {
+  readonly id: string
+  readonly name: string
+  readonly wordCount: number
+  readonly sametypesequence?: string
+  readonly ifoPath: string
+  readonly idxPath: string
+  readonly dictPath: string
+}
+
+export interface DictionaryListResponse {
+  readonly dictionaries: readonly DictionaryMeta[]
+}
+
+export interface DictionaryRegisterRequest {
+  readonly path: string
+}
+
+export interface DictionaryRegisterResponse {
+  readonly dictionary: DictionaryMeta
+}
+
+export interface DictionaryRemoveRequest {
+  readonly id: string
+}
+
+export interface DictionaryRemoveResponse {
+  readonly removed: boolean
+}
+
 export interface ReaderStateGetRequest {
   readonly bookHash: string
 }
@@ -143,6 +177,18 @@ export interface CommandMap {
   [COMMAND.libraryRemove]: {
     readonly request: LibraryRemoveRequest
     readonly response: LibraryRemoveResponse
+  }
+  [COMMAND.dictionaryList]: {
+    readonly request: undefined
+    readonly response: DictionaryListResponse
+  }
+  [COMMAND.dictionaryRegister]: {
+    readonly request: DictionaryRegisterRequest
+    readonly response: DictionaryRegisterResponse
+  }
+  [COMMAND.dictionaryRemove]: {
+    readonly request: DictionaryRemoveRequest
+    readonly response: DictionaryRemoveResponse
   }
 }
 
@@ -221,6 +267,24 @@ export const libraryImportResponseSchema = z.object({ book: libraryBookSchema })
 export const libraryRemoveRequestSchema = z.object({ bookHash: bookHash })
 export const libraryRemoveResponseSchema = z.object({ removed: z.boolean() })
 
+const dictionaryMetaSchema = z.object({
+  id: z.string().min(8).max(64),
+  name: z.string().min(1).max(256),
+  wordCount: z.number().int().min(0),
+  sametypesequence: z.string().max(16).optional(),
+  ifoPath: z.string().min(1).max(4096),
+  idxPath: z.string().min(1).max(4096),
+  dictPath: z.string().min(1).max(4096),
+})
+
+export const dictionaryListResponseSchema = z.object({
+  dictionaries: z.array(dictionaryMetaSchema).max(1000),
+})
+export const dictionaryRegisterRequestSchema = z.object({ path: z.string().min(1).max(4096) })
+export const dictionaryRegisterResponseSchema = z.object({ dictionary: dictionaryMetaSchema })
+export const dictionaryRemoveRequestSchema = z.object({ id: z.string().min(8).max(64) })
+export const dictionaryRemoveResponseSchema = z.object({ removed: z.boolean() })
+
 /** Minimal structural interface any zod schema satisfies — keeps the map version-proof. */
 export interface ResponseValidator<T> {
   parse(value: unknown): T
@@ -236,6 +300,9 @@ export const responseValidators: {
   [COMMAND.libraryList]: libraryListResponseSchema,
   [COMMAND.libraryImport]: libraryImportResponseSchema,
   [COMMAND.libraryRemove]: libraryRemoveResponseSchema,
+  [COMMAND.dictionaryList]: dictionaryListResponseSchema,
+  [COMMAND.dictionaryRegister]: dictionaryRegisterResponseSchema,
+  [COMMAND.dictionaryRemove]: dictionaryRemoveResponseSchema,
 }
 
 export const requestValidators: { [K in CommandName]: ResponseValidator<unknown> | undefined } = {
@@ -246,4 +313,7 @@ export const requestValidators: { [K in CommandName]: ResponseValidator<unknown>
   [COMMAND.libraryList]: undefined,
   [COMMAND.libraryImport]: libraryImportRequestSchema,
   [COMMAND.libraryRemove]: libraryRemoveRequestSchema,
+  [COMMAND.dictionaryList]: undefined,
+  [COMMAND.dictionaryRegister]: dictionaryRegisterRequestSchema,
+  [COMMAND.dictionaryRemove]: dictionaryRemoveRequestSchema,
 }

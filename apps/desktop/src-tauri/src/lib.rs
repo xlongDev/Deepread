@@ -5,6 +5,7 @@
 //! unit-testable without a Tauri runtime.
 
 mod commands;
+mod dictionary;
 mod error;
 mod events;
 mod library;
@@ -35,6 +36,9 @@ pub fn run() {
             library::library_list,
             library::library_import,
             library::library_remove,
+            dictionary::dictionary_list,
+            dictionary::dictionary_register,
+            dictionary::dictionary_remove,
         ])
         .setup(|app| {
             let payload = events::AppReadyPayload {

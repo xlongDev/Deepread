@@ -121,6 +121,9 @@ importers:
         specifier: 6.3.289
         version: 6.3.289
     devDependencies:
+      jsdom:
+        specifier: 30.0.1
+        version: 30.0.1
       typescript:
         specifier: 7.0.2
         version: 7.0.2

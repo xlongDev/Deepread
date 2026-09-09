@@ -93,6 +93,7 @@ export class FoliateAdapter implements ReaderEngine {
   readonly #annotationCfis = new Map<string, string>()
   #theme: ReaderTheme | null = null
   #layout: { fontSize?: number; lineHeight?: number; fontFamily?: 'serif' | 'sans' } = {}
+  #tapTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(host: HTMLElement, callbacks: EngineCallbacks = {}) {
     this.#host = host
@@ -124,16 +125,20 @@ export class FoliateAdapter implements ReaderEngine {
         if (!selection || selection.isCollapsed) {
           this.#callbacks.onSelection?.(null)
           // Page-turn zones: taps in the outer thirds of reflowable pages turn
-          // the page, a tap in the middle toggles the reading chrome.
+          // the page, a tap in the middle toggles the reading chrome. The zone
+          // action is deferred so a double-click word selection cancels it.
           const target = domEvent.target
           const interactive =
             target instanceof Element && target.closest('a, button, input, [role="button"]')
           if (!interactive && doc.defaultView) {
             const ratio = domEvent.clientX / Math.max(1, doc.defaultView.innerWidth)
-            this.#callbacks.onTapZone?.(ratio < 0.3 ? 'left' : ratio > 0.7 ? 'right' : 'center')
+            const zone = ratio < 0.3 ? 'left' : ratio > 0.7 ? 'right' : 'center'
+            clearTimeout(this.#tapTimer)
+            this.#tapTimer = setTimeout(() => this.#callbacks.onTapZone?.(zone), 250)
           }
           return
         }
+        clearTimeout(this.#tapTimer)
         const range = selection.getRangeAt(0)
         const text = selection.toString().slice(0, MAX_SELECTION_TEXT)
         if (!text.trim()) {
@@ -141,10 +146,19 @@ export class FoliateAdapter implements ReaderEngine {
           return
         }
         const rect = range.getBoundingClientRect()
+        // The range rect is relative to the section iframe; translate it into
+        // window coordinates so the UI can anchor fixed-position toolbars.
+        const frame = doc.defaultView?.frameElement?.getBoundingClientRect()
+        const offsetX = frame?.x ?? 0
+        const offsetY = frame?.y ?? 0
         this.#callbacks.onSelection?.({
           cfi: this.#requireView().getCFI(index, range),
           text,
-          rect: { top: rect.top, left: rect.left, height: rect.height },
+          rect: {
+            top: rect.top + offsetY,
+            left: rect.left + offsetX,
+            height: rect.height,
+          },
         })
       })
     })
@@ -224,6 +238,7 @@ export class FoliateAdapter implements ReaderEngine {
   }
 
   async destroy(): Promise<void> {
+    clearTimeout(this.#tapTimer)
     await this.close()
     this.#view?.remove()
     this.#view = null
@@ -344,6 +359,10 @@ export class FoliateAdapter implements ReaderEngine {
     if (view.isFixedLayout) return
     view.renderer.setAttribute('flow', layout.flow === 'scrolled' ? 'scrolled' : 'paginated')
     view.renderer.setAttribute('margin', String(layout.margin ?? 48))
+    // Kernel page-turn animation (WAAPI-driven); motion tokenization is a
+    // kernel concern and does not run for prefers-reduced-motion users only
+    // via CSS — accepted tradeoff, see ADR-0006.
+    view.renderer.setAttribute('animated', '')
     // Dual page only makes sense on wide paginated surfaces; the kernel picks
     // its column count from these two attributes.
     view.renderer.setAttribute('max-column-count', layout.pageMode === 'dual' ? '2' : '1')
