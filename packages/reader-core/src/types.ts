@@ -83,4 +83,14 @@ export interface ReaderLayout {
   readonly margin?: number
   /** Base font size in px for reflowable content (books keep their own fonts). */
   readonly fontSize?: number
+  /**
+   * Line-height override for reflowable content. Omit to keep the book's own
+   * leading (原版排版优先).
+   */
+  readonly lineHeight?: number
+  /**
+   * Font-family override for reflowable content (`serif` | `sans` | `heitı`).
+   * Omit to keep the book's own fonts (原版排版优先).
+   */
+  readonly fontFamily?: 'serif' | 'sans'
 }

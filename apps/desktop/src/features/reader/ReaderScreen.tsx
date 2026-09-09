@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   ArrowRight,
   BookmarkSimple,
-  Columns,
   Copy,
   Highlighter,
   List,
@@ -11,8 +10,8 @@ import {
   Minus,
   Moon,
   Plus,
-  Scroll,
   Sun,
+  TextAa,
   Trash,
   X,
 } from '@phosphor-icons/react'
@@ -43,6 +42,30 @@ const READER_THEMES: readonly { readonly label: string; readonly theme: ReaderTh
 
 const HIGHLIGHT_COLOR = '#f5d76e'
 const FONT_SIZES = [14, 16, 18, 20] as const
+// undefined means 原书排版 (the book's own typography wins)
+const LINE_HEIGHT_OPTIONS: readonly {
+  readonly label: string
+  readonly value: number | undefined
+}[] = [
+  { label: '原书', value: undefined },
+  { label: '紧凑', value: 1.45 },
+  { label: '标准', value: 1.65 },
+  { label: '宽松', value: 1.9 },
+]
+const FONT_FAMILY_OPTIONS: readonly {
+  readonly label: string
+  readonly value: 'serif' | 'sans' | undefined
+}[] = [
+  { label: '原书', value: undefined },
+  { label: '衬线', value: 'serif' },
+  { label: '无衬线', value: 'sans' },
+]
+type ViewMode = 'single' | 'dual' | 'scroll'
+const VIEW_MODE_OPTIONS: readonly { readonly label: string; readonly value: ViewMode }[] = [
+  { label: '单页', value: 'single' },
+  { label: '双页', value: 'dual' },
+  { label: '滚动', value: 'scroll' },
+]
 const CHROME_TIMEOUT_MS = 2500
 const SAVE_DEBOUNCE_MS = 800
 const MAX_SHOWN_SEARCH_RESULTS = 50
@@ -82,8 +105,10 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   const bookmarksRef = useRef<readonly BookmarkRecord[]>([])
   const overlayOpenRef = useRef(false)
   const settingsRef = useRef({
-    flow: 'paginated' as 'paginated' | 'scrolled',
+    viewMode: 'single' as ViewMode,
     fontSize: 16,
+    lineHeight: undefined as number | undefined,
+    fontFamily: undefined as 'serif' | 'sans' | undefined,
     themeIndex: 0,
   })
 
@@ -102,8 +127,11 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   const [activeAnnotation, setActiveAnnotation] = useState<string | null>(null)
   const [annotations, setAnnotations] = useState<readonly AnnotationRecord[]>([])
   const [bookmarks, setBookmarks] = useState<readonly BookmarkRecord[]>([])
-  const [flow, setFlow] = useState<'paginated' | 'scrolled'>('paginated')
+  const [viewMode, setViewMode] = useState<ViewMode>('single')
   const [fontSize, setFontSize] = useState<number>(16)
+  const [lineHeight, setLineHeight] = useState<number | undefined>(undefined)
+  const [fontFamily, setFontFamily] = useState<'serif' | 'sans' | undefined>(undefined)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [themeIndex, setThemeIndex] = useState(0)
   const [searchResults, setSearchResults] = useState<readonly { cfi: string; excerpt: string }[]>(
     [],
@@ -123,8 +151,8 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   }, [tocOpen, selection, activeAnnotation])
 
   useEffect(() => {
-    settingsRef.current = { flow, fontSize, themeIndex }
-  }, [flow, fontSize, themeIndex])
+    settingsRef.current = { viewMode, fontSize, lineHeight, fontFamily, themeIndex }
+  }, [viewMode, fontSize, lineHeight, fontFamily, themeIndex])
 
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -219,9 +247,11 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           READER_THEMES[settingsRef.current.themeIndex]?.theme ?? READER_THEMES[0]!.theme,
         )
         await adapter.setLayout({
-          flow: settingsRef.current.flow,
-          pageMode: 'single',
+          flow: settingsRef.current.viewMode === 'scroll' ? 'scrolled' : 'paginated',
+          pageMode: settingsRef.current.viewMode === 'dual' ? 'dual' : 'single',
           fontSize: settingsRef.current.fontSize,
+          lineHeight: settingsRef.current.lineHeight,
+          fontFamily: settingsRef.current.fontFamily,
         })
 
         let restored = null
@@ -275,6 +305,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         showChrome()
       } else if (event.key === 'Escape') {
         setTocOpen(false)
+        setSettingsOpen(false)
         setSelection(null)
         setActiveAnnotation(null)
       }
@@ -293,17 +324,36 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     void adapterRef.current?.setTheme(READER_THEMES[next]?.theme ?? READER_THEMES[0]!.theme)
   }
 
-  const changeFontSize = (delta: number): void => {
-    const current = FONT_SIZES.indexOf(fontSize as (typeof FONT_SIZES)[number])
-    const next = FONT_SIZES[Math.min(FONT_SIZES.length - 1, Math.max(0, current + delta))] ?? 16
-    setFontSize(next)
-    void adapterRef.current?.setLayout({ flow, pageMode: 'single', fontSize: next })
+  const updateLayout = (patch: {
+    viewMode?: ViewMode
+    fontSize?: number
+    lineHeight?: number | undefined
+    fontFamily?: 'serif' | 'sans' | undefined
+  }): void => {
+    const next = {
+      viewMode: patch.viewMode ?? viewMode,
+      fontSize: patch.fontSize ?? fontSize,
+      lineHeight: patch.lineHeight !== undefined ? patch.lineHeight : lineHeight,
+      fontFamily: patch.fontFamily !== undefined ? patch.fontFamily : fontFamily,
+    }
+    setViewMode(next.viewMode)
+    setFontSize(next.fontSize)
+    setLineHeight(next.lineHeight)
+    setFontFamily(next.fontFamily)
+    void adapterRef.current?.setLayout({
+      flow: next.viewMode === 'scroll' ? 'scrolled' : 'paginated',
+      pageMode: next.viewMode === 'dual' ? 'dual' : 'single',
+      fontSize: next.fontSize,
+      lineHeight: next.lineHeight,
+      fontFamily: next.fontFamily,
+    })
   }
 
-  const toggleFlow = (): void => {
-    const next = flow === 'paginated' ? 'scrolled' : 'paginated'
-    setFlow(next)
-    void adapterRef.current?.setLayout({ flow: next, pageMode: 'single', fontSize })
+  const changeFontSize = (delta: number): void => {
+    const current = FONT_SIZES.indexOf(fontSize as (typeof FONT_SIZES)[number])
+    updateLayout({
+      fontSize: FONT_SIZES[Math.min(FONT_SIZES.length - 1, Math.max(0, current + delta))] ?? 16,
+    })
   }
 
   const goToCfi = useCallback((cfi: string): void => {
@@ -419,7 +469,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     >
       <div ref={hostRef} className="reader-host" />
 
-      {phase === 'opening' && <div className="reader-opening">正在打开 {title}…</div>}
+      {phase === 'opening' && <div className="reader-opening" data-title={`正在打开 ${title}…`} />}
       {phase === 'error' && (
         <div className="reader-error" role="alert">
           <p>{error}</p>
@@ -461,31 +511,11 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         </button>
         <button
           type="button"
-          className="chrome-button"
-          onClick={() => changeFontSize(-1)}
-          title="减小字号"
+          className={`chrome-button${settingsOpen ? ' is-active' : ''}`}
+          onClick={() => setSettingsOpen((open) => !open)}
+          title="排版设置"
         >
-          <Minus size={18} weight="regular" aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="chrome-button"
-          onClick={() => changeFontSize(1)}
-          title="增大字号"
-        >
-          <Plus size={18} weight="regular" aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="chrome-button"
-          onClick={toggleFlow}
-          title={flow === 'paginated' ? '切换为滚动' : '切换为分页'}
-        >
-          {flow === 'paginated' ? (
-            <Scroll size={18} weight="regular" aria-hidden />
-          ) : (
-            <Columns size={18} weight="regular" aria-hidden />
-          )}
+          <TextAa size={18} weight="regular" aria-hidden />
         </button>
         <button
           type="button"
@@ -499,6 +529,78 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           <List size={18} weight="regular" aria-hidden />
         </button>
       </header>
+
+      {settingsOpen && (
+        <section className="reader-settings" aria-label="排版设置">
+          <div className="settings-row">
+            <span className="settings-label">字号</span>
+            <div className="segmented">
+              <button
+                type="button"
+                className="chrome-button"
+                onClick={() => changeFontSize(-1)}
+                title="减小字号"
+              >
+                <Minus size={14} weight="regular" aria-hidden />
+              </button>
+              <span className="segmented-value">{fontSize}px</span>
+              <button
+                type="button"
+                className="chrome-button"
+                onClick={() => changeFontSize(1)}
+                title="增大字号"
+              >
+                <Plus size={14} weight="regular" aria-hidden />
+              </button>
+            </div>
+          </div>
+          <div className="settings-row">
+            <span className="settings-label">行距</span>
+            <div className="segmented">
+              {LINE_HEIGHT_OPTIONS.map((option) => (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={lineHeight === option.value ? 'is-active' : ''}
+                  onClick={() => updateLayout({ lineHeight: option.value })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="settings-row">
+            <span className="settings-label">字体</span>
+            <div className="segmented">
+              {FONT_FAMILY_OPTIONS.map((option) => (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={fontFamily === option.value ? 'is-active' : ''}
+                  onClick={() => updateLayout({ fontFamily: option.value })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="settings-row">
+            <span className="settings-label">方式</span>
+            <div className="segmented">
+              {VIEW_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={viewMode === option.value ? 'is-active' : ''}
+                  onClick={() => updateLayout({ viewMode: option.value })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
 
       {tocOpen && (
         <nav className="reader-toc" aria-label="目录与搜索">

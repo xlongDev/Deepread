@@ -66,9 +66,22 @@ function titleFromName(name: string): string {
   )
 }
 
-function buildReaderCSS(theme: ReaderTheme, fontSize?: number): string {
+function buildReaderCSS(
+  theme: ReaderTheme,
+  layout: { fontSize?: number; lineHeight?: number; fontFamily?: 'serif' | 'sans' },
+): string {
+  const fontStack =
+    layout.fontFamily === 'serif'
+      ? 'var(--font-serif, Georgia, "Songti SC", serif)'
+      : layout.fontFamily === 'sans'
+        ? 'var(--font-sans, -apple-system, "PingFang SC", sans-serif)'
+        : undefined
   return [
-    `html { font-size: ${fontSize ?? 16}px; }`,
+    `html { font-size: ${layout.fontSize ?? 16}px; }`,
+    ...(layout.lineHeight !== undefined
+      ? [`body { line-height: ${layout.lineHeight} !important; }`]
+      : []),
+    ...(fontStack ? [`body { font-family: ${fontStack} !important; }`] : []),
     `html, body { background: ${theme.background} !important; color: ${theme.foreground} !important; }`,
   ].join('\n')
 }
@@ -79,7 +92,7 @@ export class FoliateAdapter implements ReaderEngine {
   readonly #callbacks: EngineCallbacks
   readonly #annotationCfis = new Map<string, string>()
   #theme: ReaderTheme | null = null
-  #fontSize: number | undefined
+  #layout: { fontSize?: number; lineHeight?: number; fontFamily?: 'serif' | 'sans' } = {}
 
   constructor(host: HTMLElement, callbacks: EngineCallbacks = {}) {
     this.#host = host
@@ -89,7 +102,7 @@ export class FoliateAdapter implements ReaderEngine {
   #applyStyles(): void {
     const view = this.#view
     if (!view || view.isFixedLayout || !this.#theme) return
-    view.renderer.setStyles?.(buildReaderCSS(this.#theme, this.#fontSize))
+    view.renderer.setStyles?.(buildReaderCSS(this.#theme, this.#layout))
   }
 
   #requireView(): View {
@@ -331,7 +344,15 @@ export class FoliateAdapter implements ReaderEngine {
     if (view.isFixedLayout) return
     view.renderer.setAttribute('flow', layout.flow === 'scrolled' ? 'scrolled' : 'paginated')
     view.renderer.setAttribute('margin', String(layout.margin ?? 48))
-    if (layout.fontSize !== undefined) this.#fontSize = layout.fontSize
+    // Dual page only makes sense on wide paginated surfaces; the kernel picks
+    // its column count from these two attributes.
+    view.renderer.setAttribute('max-column-count', layout.pageMode === 'dual' ? '2' : '1')
+    view.renderer.setAttribute('max-inline-size', layout.pageMode === 'dual' ? '1100' : '760')
+    this.#layout = {
+      ...(layout.fontSize !== undefined ? { fontSize: layout.fontSize } : {}),
+      ...(layout.lineHeight !== undefined ? { lineHeight: layout.lineHeight } : {}),
+      ...(layout.fontFamily !== undefined ? { fontFamily: layout.fontFamily } : {}),
+    }
     this.#applyStyles()
   }
 }
