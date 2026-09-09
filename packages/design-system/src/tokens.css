@@ -1,0 +1,91 @@
+/*
+ * Design tokens — runtime source of truth (Phase 0 base scale).
+ * TypeScript mirror: src/tokens.ts (kept in sync by tokens.test.ts).
+ */
+
+:root {
+  /* Color — light */
+  --color-bg: #f6f5f2;
+  --color-surface: #ffffff;
+  --color-surface-glass: rgba(255, 255, 255, 0.62);
+  --color-text-primary: #1d1b17;
+  --color-text-secondary: #6f6a61;
+  --color-text-tertiary: #9c968b;
+  --color-accent: #3d6deb;
+  --color-accent-soft: rgba(61, 109, 235, 0.12);
+  --color-border: rgba(29, 27, 23, 0.1);
+  --color-highlight: rgba(255, 255, 255, 0.65);
+  --color-danger: #c4453d;
+  --color-success: #2f8a5b;
+
+  /* Typography */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  --font-serif: 'Iowan Old Style', Palatino, 'Songti SC', 'Noto Serif CJK SC', serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --font-size-sm: 13px;
+  --font-size-md: 15px;
+  --font-size-lg: 21px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --line-height-tight: 1.25;
+  --line-height-body: 1.6;
+
+  /* Spacing */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 48px;
+
+  /* Radius — super rounded */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-full: 9999px;
+
+  /* Shadow */
+  --shadow-soft: 0 1px 2px rgba(20, 18, 14, 0.04), 0 8px 24px rgba(20, 18, 14, 0.06);
+  --shadow-elevated: 0 2px 6px rgba(20, 18, 14, 0.06), 0 16px 48px rgba(20, 18, 14, 0.1);
+
+  /* Blur */
+  --blur-glass: 20px;
+  --blur-glass-heavy: 40px;
+
+  /* Motion */
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --duration-slow: 400ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+:root[data-theme='dark'] {
+  --color-bg: #131210;
+  --color-surface: #1d1b18;
+  --color-surface-glass: rgba(29, 27, 24, 0.55);
+  --color-text-primary: #ece9e3;
+  --color-text-secondary: #a39d92;
+  --color-text-tertiary: #6f6a61;
+  --color-accent: #6e93f6;
+  --color-accent-soft: rgba(110, 147, 246, 0.16);
+  --color-border: rgba(236, 233, 227, 0.12);
+  --color-highlight: rgba(255, 255, 255, 0.08);
+  --color-danger: #e0706a;
+  --color-success: #5cb886;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-elevated: 0 2px 6px rgba(0, 0, 0, 0.45), 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* Reduced-motion support is part of the token system, not an afterthought. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}

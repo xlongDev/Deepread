@@ -1,0 +1,44 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "dist/**",
+    "coverage/**",
+    "node_modules/**",
+    "target/**",
+    "**/src-tauri/target/**",
+    "**/src-tauri/gen/**",
+    "**/src-tauri/icons/**",
+    "pnpm-lock.yaml",
+    "packages/reader-adapter/src/books/vendor/**"
+  ],
+  "plugins": ["typescript", "react", "react-hooks", "jsx-a11y"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error"
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "no-explicit-any": "error",
+    "no-unused-vars": "error",
+    "exhaustive-deps": "error"
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "es2024": true
+  },
+  "overrides": [
+    {
+      "files": ["packages/reader-adapter/src/index.ts"],
+      "rules": {
+        "typescript/triple-slash-reference": "off"
+      }
+    },
+    {
+      "files": ["**/*.d.ts"],
+      "rules": {
+        "typescript/no-extraneous-class": "off"
+      }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "deepread",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Deepread — a local-first, cross-platform AI ebook reader (Personal Reading OS)",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "oxlint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "build": "pnpm --filter @deepread/desktop build",
+    "dev": "pnpm --filter @deepread/desktop dev",
+    "tauri": "pnpm --filter @deepread/desktop tauri",
+    "cargo:check": "cargo check --workspace --all-targets",
+    "cargo:test": "cargo test --workspace",
+    "cargo:fmt": "cargo fmt --all",
+    "cargo:clippy": "cargo clippy --workspace --all-targets -- -D warnings",
+    "fixtures": "bash scripts/make-fixtures.sh"
+  },
+  "devDependencies": {
+    "oxlint": "1.82.0",
+    "prettier": "3.9.6",
+    "typescript": "7.0.2"
+  }
+}

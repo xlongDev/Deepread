@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <book-title>山中手记</book-title>
+      <author><first-name>山</first-name><last-name>客</last-name></author>
+      <lang>zh</lang>
+    </title-info>
+  </description>
+  <body>
+    <title><p>第一日 进山</p></title>
+    <p>进山的第一日,雾把所有的路都收走了,只留下脚下这一条。</p>
+    <title><p>第二日 听泉</p></title>
+    <p>泉水在夜里比白天响。山里人说,那是因为夜晚的耳朵更诚实。</p>
+  </body>
+</FictionBook>
