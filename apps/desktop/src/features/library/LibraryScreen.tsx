@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import { BookOpenText, X } from '@phosphor-icons/react'
 import { open } from '@tauri-apps/plugin-dialog'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { toAppError, type AppInfo, type LibraryBook } from '@deepread/shared'
 import {
   ACCEPTED_EXTENSIONS,
@@ -54,24 +55,56 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
     }
   }, [])
 
+  const importPaths = useCallback(async (paths: readonly string[]): Promise<void> => {
+    for (const path of paths) {
+      try {
+        const response = await invokeCommand('library.import', { path })
+        setBooks((current) => [
+          response.book,
+          ...current.filter((b) => b.hash !== response.book.hash),
+        ])
+        setProblem(null)
+      } catch (error) {
+        setProblem(toAppError(error).message ?? null)
+      }
+    }
+  }, [])
+
   const importFromDialog = useCallback(async (): Promise<void> => {
     const path = await open({
       multiple: false,
       directory: false,
       filters: [{ name: '电子书', extensions: DIALOG_EXTENSIONS }],
     })
-    if (!path) return
-    try {
-      const response = await invokeCommand('library.import', { path })
-      setBooks((current) => [
-        response.book,
-        ...current.filter((b) => b.hash !== response.book.hash),
-      ])
-      setProblem(null)
-    } catch (error) {
-      setProblem(toAppError(error).message ?? null)
+    if (path) await importPaths([path])
+  }, [importPaths])
+
+  // In Tauri the webview intercepts file drops and reports absolute paths,
+  // which go straight to library.import — the browser path below keeps
+  // working for dev mode only.
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload
+        if (payload.type === 'enter' || payload.type === 'over') setDragging(true)
+        else if (payload.type === 'leave') setDragging(false)
+        else if (payload.type === 'drop') {
+          setDragging(false)
+          void importPaths(payload.paths)
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      })
+    return () => {
+      cancelled = true
+      unlisten?.()
     }
-  }, [])
+  }, [importPaths])
 
   const importFromBrowserFile = useCallback(
     async (files: readonly File[]): Promise<void> => {

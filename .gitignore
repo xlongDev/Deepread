@@ -21,3 +21,12 @@ coverage/
 .idea/
 .vscode/
 *.log
+
+# 用户本地测试用书(不入库)
+/*.epub
+/*.mobi
+/*.azw3
+/*.azw
+/*.pdf
+/*.fb2
+/*.cbz

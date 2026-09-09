@@ -13,6 +13,12 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(async () => null),
 }))
 
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: vi.fn(async (): Promise<() => void> => () => {}),
+  }),
+}))
+
 const invokeCommandMock = vi.mocked(invokeCommand)
 
 const appInfo: AppInfo = {

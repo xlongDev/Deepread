@@ -129,3 +129,24 @@ declare module 'foliate-js/overlayer.js' {
     static underline: (...args: unknown[]) => unknown
   }
 }
+
+declare module 'foliate-js/mobi.js' {
+  import type { FoliateBook } from 'foliate-js/view.js'
+
+  export function isMOBI(file: Blob): Promise<boolean>
+
+  export class MOBI {
+    constructor(options: { unzlib: (data: Uint8Array) => Uint8Array })
+    open(file: Blob): Promise<FoliateBook>
+  }
+}
+
+declare module 'foliate-js/fb2.js' {
+  import type { FoliateBook } from 'foliate-js/view.js'
+
+  export function makeFB2(file: Blob): Promise<FoliateBook>
+}
+
+declare module 'foliate-js/vendor/fflate.js' {
+  export function unzlibSync(data: Uint8Array): Uint8Array
+}

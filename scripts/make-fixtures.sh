@@ -171,6 +171,9 @@ startxref
 %%EOF
 EOF
 
+# --- MOBI (generated minimal but real PalmDB/PalmDOC/MOBI binary) -----------
+node "$ROOT/scripts/make-mobi.mjs"
+
 # --- PDF.js support assets (CJK cmaps + standard fonts) ---------------------
 if [ -d "$PDFJS_DIST" ]; then
   rm -rf "$PUBLIC_PDFJS/cmaps" "$PUBLIC_PDFJS/standard_fonts"

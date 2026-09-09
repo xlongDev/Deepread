@@ -26,6 +26,7 @@ import type {
 import type { FoliateAnnotation, FoliateTocItem, View, ViewLocation } from 'foliate-js/view.js'
 import { Overlayer } from 'foliate-js/overlayer.js'
 import { isSupported } from './format'
+import { buildMobiBook } from './books/mobi-book'
 import { buildTextBook, decodeText } from './books/text-book'
 import { buildMarkdownBook } from './books/markdown-book'
 
@@ -172,6 +173,11 @@ export class FoliateAdapter implements ReaderEngine {
         case 'pdf': {
           const { buildPdfBook } = await import('./books/pdf-book')
           await view.open(await buildPdfBook(file))
+          break
+        }
+        case 'mobi':
+        case 'azw3': {
+          await view.open(await buildMobiBook(file))
           break
         }
         case 'txt': {
