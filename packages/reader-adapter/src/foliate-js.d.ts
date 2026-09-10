@@ -77,6 +77,7 @@ declare module 'foliate-js/view.js' {
     setAttribute(name: string, value: string): void
     getAttribute(name: string): string | null
     setStyles?(css: string): void
+    scrollToAnchor?(anchor: unknown, select?: boolean): Promise<void>
     next(distance?: number): Promise<void>
     prev(distance?: number): Promise<void>
     getContents(): { doc: Document; index: number; overlayer?: unknown }[]

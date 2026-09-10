@@ -244,7 +244,12 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
       })
   }, [])
 
+  // One effect owns the adapter lifecycle: create → open → restore → destroy.
+  // Splitting create and open across effects raced under StrictMode's
+  // double-mount and leaked a second kernel view into the host.
   useEffect(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    if (chromeTimerRef.current) clearTimeout(chromeTimerRef.current)
     const adapter = new FoliateAdapter(hostRef.current ?? document.body, {
       onRelocate: (location) => callbacksRef.current.onRelocate?.(location),
       onSelection: (sel) => callbacksRef.current.onSelection?.(sel),
@@ -252,19 +257,8 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
       onTapZone: (zone) => callbacksRef.current.onTapZone?.(zone),
     })
     adapterRef.current = adapter
-    return () => {
-      adapterRef.current = null
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      if (chromeTimerRef.current) clearTimeout(chromeTimerRef.current)
-      void adapter.destroy()
-    }
-  }, [])
-
-  useEffect(() => {
     let cancelled = false
     void (async () => {
-      const adapter = adapterRef.current
-      if (!adapter) return
       try {
         await adapter.open({
           bookId: book.bookId,
@@ -315,6 +309,8 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     })()
     return () => {
       cancelled = true
+      adapterRef.current = null
+      void adapter.destroy()
     }
   }, [book])
 

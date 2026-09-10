@@ -94,6 +94,7 @@ export class FoliateAdapter implements ReaderEngine {
   #theme: ReaderTheme | null = null
   #layout: { fontSize?: number; lineHeight?: number; fontFamily?: 'serif' | 'sans' } = {}
   #tapTimer: ReturnType<typeof setTimeout> | undefined
+  #destroyed = false
 
   constructor(host: HTMLElement, callbacks: EngineCallbacks = {}) {
     this.#host = host
@@ -108,7 +109,11 @@ export class FoliateAdapter implements ReaderEngine {
 
   #requireView(): View {
     if (this.#view) return this.#view
-    const view = document.createElement('foliate-view') as View
+    // Adopt an orphaned view left in the host by a destroyed sibling adapter
+    // (StrictMode's double-mount races) instead of stacking another one —
+    // an unattached kernel view has no renderer and only pollutes the host.
+    const existing = this.#host.querySelector('foliate-view') as View | null
+    const view = existing ?? (document.createElement('foliate-view') as View)
     view.addEventListener('relocate', (event) => {
       const detail = (event as CustomEvent).detail as ViewLocation
       // Some custom-book sections report a non-finite fraction; the UI slider
@@ -177,20 +182,26 @@ export class FoliateAdapter implements ReaderEngine {
       this.#callbacks.onShowAnnotation?.(value)
     })
     this.#view = view
-    this.#host.append(view)
+    if (!existing) this.#host.append(view)
     return view
   }
 
   async open(source: BookSource): Promise<void> {
+    // Idempotent per adapter: a re-open (StrictMode double-effect, book
+    // switch) tears down the previous renderer first, otherwise the kernel
+    // appends a second paginator below the first and the live one renders
+    // off-screen.
+    await this.close()
+    if (this.#destroyed) return
     if (!isSupported(source.format)) {
       throw new AppError(
         ErrorCodes.bookUnsupportedFormat,
         `CHM 尚不支持:${source.name ?? '该文件'}。`,
       )
     }
-    const view = this.#requireView()
     try {
       const response = await fetch(source.url)
+      if (this.#destroyed) return
       if (!response.ok) {
         throw new AppError(ErrorCodes.bookOpenFailed, `无法读取书籍数据(${source.url})。`)
       }
@@ -202,32 +213,34 @@ export class FoliateAdapter implements ReaderEngine {
       switch (source.format) {
         case 'pdf': {
           const { buildPdfBook } = await import('./books/pdf-book')
-          await view.open(await buildPdfBook(file))
+          await this.#requireView().open(await buildPdfBook(file))
           break
         }
         case 'mobi':
         case 'azw3': {
-          await view.open(await buildMobiBook(file))
+          await this.#requireView().open(await buildMobiBook(file))
           break
         }
         case 'txt': {
-          await view.open(
+          await this.#requireView().open(
             buildTextBook(decodeText(await file.arrayBuffer()), titleFromName(file.name)),
           )
           break
         }
         case 'md': {
-          await view.open(
+          await this.#requireView().open(
             buildMarkdownBook(decodeText(await file.arrayBuffer()), titleFromName(file.name)),
           )
           break
         }
         default:
-          await view.open(file)
+          await this.#requireView().open(file)
       }
     } catch (error) {
       throw toAppError(error, ErrorCodes.bookParseFailed)
     }
+    if (this.#destroyed) return
+    const view = this.#requireView()
     this.#applyStyles()
     // The paginator only renders on explicit navigation (kernel contract), so
     // land on the book's reading start; persisted-position restore then
@@ -241,6 +254,7 @@ export class FoliateAdapter implements ReaderEngine {
   }
 
   async destroy(): Promise<void> {
+    this.#destroyed = true
     clearTimeout(this.#tapTimer)
     await this.close()
     this.#view?.remove()
@@ -293,7 +307,19 @@ export class FoliateAdapter implements ReaderEngine {
     if (location.cfi !== undefined) {
       await view.goTo(location.cfi)
     } else if (location.href !== undefined) {
-      await view.goTo(location.href)
+      const resolved = await view.goTo(location.href)
+      // The kernel's page-1 anchor convention lands one column into the strip
+      // for adapter-built books, leaving the viewport on a blank column.
+      // Re-anchor on the target section's first element so the content is
+      // actually on screen (CFI locations already anchor precisely).
+      const index = resolved?.index
+      const content =
+        index !== undefined ? view.renderer.getContents().find((x) => x.index === index) : undefined
+      if (content) {
+        const range = content.doc.createRange()
+        range.selectNodeContents(content.doc.body)
+        view.renderer.scrollToAnchor?.(range)
+      }
     } else {
       await view.goToFraction(location.progress)
     }
@@ -362,10 +388,7 @@ export class FoliateAdapter implements ReaderEngine {
     if (view.isFixedLayout) return
     view.renderer.setAttribute('flow', layout.flow === 'scrolled' ? 'scrolled' : 'paginated')
     view.renderer.setAttribute('margin', String(layout.margin ?? 48))
-    // Kernel page-turn animation (WAAPI-driven); motion tokenization is a
-    // kernel concern and does not run for prefers-reduced-motion users only
-    // via CSS — accepted tradeoff, see ADR-0006.
-    view.renderer.setAttribute('animated', '')
+
     // Dual page only makes sense on wide paginated surfaces; the kernel picks
     // its column count from these two attributes.
     view.renderer.setAttribute('max-column-count', layout.pageMode === 'dual' ? '2' : '1')
