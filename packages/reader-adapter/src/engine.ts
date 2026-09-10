@@ -111,9 +111,12 @@ export class FoliateAdapter implements ReaderEngine {
     const view = document.createElement('foliate-view') as View
     view.addEventListener('relocate', (event) => {
       const detail = (event as CustomEvent).detail as ViewLocation
+      // Some custom-book sections report a non-finite fraction; the UI slider
+      // and percent readout must never see NaN (spec §132: progress integrity).
+      const fraction = Number.isFinite(detail.fraction) ? detail.fraction : undefined
       this.#callbacks.onRelocate?.({
         cfi: detail.cfi,
-        fraction: detail.fraction,
+        fraction,
         tocLabel: detail.tocItem?.label,
         location: detail.location,
       })

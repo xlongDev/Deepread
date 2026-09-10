@@ -20,8 +20,8 @@ declare module 'foliate-js/view.js' {
     linear?: string
     /** Estimated content size in bytes; drives reading-progress fractions. */
     size: number
-    load(): Promise<{ url: string }>
-    unload?(loaded: { url: string }): void
+    load(): Promise<string>
+    unload?(url: string): void
     createDocument?(): Promise<Document>
   }
 

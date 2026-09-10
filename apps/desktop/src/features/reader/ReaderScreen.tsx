@@ -200,7 +200,10 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   useEffect(() => {
     callbacksRef.current = {
       onRelocate: (location) => {
-        const fraction = location.fraction ?? 0
+        const fraction =
+          typeof location.fraction === 'number' && Number.isFinite(location.fraction)
+            ? location.fraction
+            : 0
         const cfi = location.cfi
         progressRef.current = cfi !== undefined ? { cfi, fraction } : progressRef.current
         setProgress({

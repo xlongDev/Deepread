@@ -28,9 +28,7 @@ export function buildMarkdownBook(source: string, title: string): FoliateBook {
   const section: FoliateSection = {
     id: 's0',
     size: byteLength(source),
-    load: async () => ({
-      url: URL.createObjectURL(new Blob([html], { type: 'text/html' })),
-    }),
+    load: async () => URL.createObjectURL(new Blob([html], { type: 'text/html' })),
     createDocument: async () => new DOMParser().parseFromString(html, 'text/html'),
   }
 

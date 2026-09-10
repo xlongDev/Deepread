@@ -13,6 +13,23 @@ import { byteLength } from './bytes'
 
 const PARAGRAPHS_PER_SECTION = 400
 
+/**
+ * Built-in chapter rules (spec §15 第一批): a short paragraph that *starts*
+ * with a chapter marker opens a new section. Content that merely contains
+ * such a marker never splits — false positives stay inside their paragraph.
+ */
+const CHAPTER_PATTERN =
+  /^\s*(?:(?:序章|楔子|终章|尾声|番外[一二三四五六七八九十]*)(?:[\s：:].{0,30})?|(?:第\s*[0-9零一二三四五六七八九十百千万两]+\s*[章卷回节部篇])(?:[\s：:.、]{0,3}[^\n]{0,30})?)\s*$/
+
+export function isChapterTitle(paragraph: string): boolean {
+  return paragraph.length <= 44 && CHAPTER_PATTERN.test(paragraph)
+}
+
+/** A paragraph that opens with a quotation mark reads as dialogue (ColorTxt). */
+export function isDialogue(paragraph: string): boolean {
+  return /^\s*[“”「『"'‘]/.test(paragraph)
+}
+
 export function decodeText(buffer: ArrayBuffer): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
@@ -42,11 +59,21 @@ export function splitParagraphs(text: string): string[] {
     .filter((block) => block.length > 0)
 }
 
-function sectionHtml(paragraphs: readonly string[]): string {
-  const body = paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('\n')
+function sectionHtml(
+  paragraphs: readonly { text: string; chapter: boolean; dialogue: boolean }[],
+): string {
+  const body = paragraphs
+    .map(({ text, chapter, dialogue }) => {
+      const escaped = escapeHtml(text)
+      if (chapter) return `<h2 class="enh-chapter">${escaped}</h2>`
+      if (dialogue) return `<p class="enh-dialogue">${escaped}</p>`
+      return `<p>${escaped}</p>`
+    })
+    .join('\n')
   return [
     '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
     'body { margin: 0; padding: 1em; }',
+    '.enh-chapter { line-height: 1.3; }',
     '</style></head><body>',
     body,
     '</body></html>',
@@ -55,19 +82,40 @@ function sectionHtml(paragraphs: readonly string[]): string {
 
 export function buildTextBook(text: string, title: string): FoliateBook {
   const paragraphs = splitParagraphs(text)
-  const sections: FoliateSection[] = []
 
-  const total = paragraphs.length
-  for (let start = 0; start < total; start += PARAGRAPHS_PER_SECTION) {
-    const chunk = paragraphs.slice(start, start + PARAGRAPHS_PER_SECTION)
-    const html = sectionHtml(chunk)
-    const index = sections.length
-    sections.push({
+  // Group into chapters at detected markers; content before the first marker
+  // becomes its own opening section. Long chapterless runs still fall back to
+  // the bounded chunk so huge flat files never create one giant iframe.
+  type Block = { text: string; chapter: boolean; dialogue: boolean }
+  const sections: { blocks: Block[]; chapterTitle?: string }[] = [{ blocks: [] }]
+  for (const paragraph of paragraphs) {
+    if (isChapterTitle(paragraph)) {
+      sections.push({
+        blocks: [{ text: paragraph, chapter: true, dialogue: false }],
+        chapterTitle: paragraph,
+      })
+      continue
+    }
+    const current = sections[sections.length - 1]!
+    current.blocks.push({ text: paragraph, chapter: false, dialogue: isDialogue(paragraph) })
+    if (current.blocks.length >= PARAGRAPHS_PER_SECTION && !current.chapterTitle) {
+      sections.push({ blocks: [] })
+    }
+  }
+
+  const builtSections: FoliateSection[] = []
+  const toc: FoliateTocItem[] = []
+  for (const section of sections) {
+    if (section.blocks.length === 0) continue
+    const index = builtSections.length
+    const html = sectionHtml(section.blocks)
+    const heading = section.blocks.find((b) => b.chapter)
+    if (heading) toc.push({ label: heading.text, href: `s${index}` })
+    builtSections.push({
       id: `s${index}`,
-      size: byteLength(chunk.join('\n\n')),
-      load: async () => ({
-        url: URL.createObjectURL(new Blob([html], { type: 'text/html' })),
-      }),
+      size: byteLength(section.blocks.map((b) => b.text).join('\n\n')),
+      // The kernel's section contract: load() resolves to a URL *string*.
+      load: async () => URL.createObjectURL(new Blob([html], { type: 'text/html' })),
       // # ponytail: every section keeps its full HTML in memory for instant
       // re-open; swap to on-demand rebuild from the source buffer if a 100MB
       // TXT actually shows memory pressure.
@@ -78,8 +126,8 @@ export function buildTextBook(text: string, title: string): FoliateBook {
   return {
     metadata: { title },
     dir: 'ltr',
-    toc: [] satisfies FoliateTocItem[],
-    sections,
+    toc: toc satisfies FoliateTocItem[],
+    sections: builtSections,
     splitTOCHref: (href) => {
       const match = /^s(\d+)$/.exec(href)
       return match ? [Number(match[1]), null] : [0, null]
