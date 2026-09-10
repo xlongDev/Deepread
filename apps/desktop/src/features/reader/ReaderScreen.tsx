@@ -26,8 +26,10 @@ import {
 } from '@deepread/shared'
 import type { ReaderTheme, TocItem } from '@deepread/reader-core'
 import {
+  applyRepair,
   buildIndex,
   FoliateAdapter,
+  reviewRepair,
   inflateGzip,
   lookupWord,
   sanitizeDefinitionHtml,
@@ -35,6 +37,7 @@ import {
   type EngineCallbacks,
   type EngineSelection,
 } from '@deepread/reader-adapter'
+import type { RepairChange } from '@deepread/reader-adapter'
 import { invokeCommand, isTauriRuntime } from '../../lib/ipc'
 import type { OpenedBook } from '../../lib/book-import'
 
@@ -157,6 +160,10 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     results: readonly { dictName: string; word: string; fields: readonly DefinitionField[] }[]
   } | null>(null)
   const [lookupLoading, setLookupLoading] = useState(false)
+  const [repairReview, setRepairReview] = useState<{
+    proposals: readonly RepairChange[]
+    accepted: ReadonlySet<string>
+  } | null>(null)
   const [panelProblem, setPanelProblem] = useState<string | null>(null)
   const dictCacheRef = useRef(
     new Map<string, { entries: ReturnType<typeof buildIndex>; dict: Uint8Array }>(),
@@ -485,6 +492,39 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     }
   }, [])
 
+  const startRepair = (): void => {
+    const source = adapterRef.current?.getSourceText()
+    if (source === null || source === undefined) return
+    const review = reviewRepair(source)
+    setRepairReview({
+      proposals: [...review.proposals],
+      accepted: new Set(review.proposals.map((proposal) => proposal.id)),
+    })
+  }
+
+  const applyAcceptedRepairs = async (): Promise<void> => {
+    const adapter = adapterRef.current
+    const review = repairReview
+    if (!adapter || !review) return
+    const source = adapter.getSourceText()
+    if (source === null) return
+    const repaired = applyRepair(source, review.proposals, [...review.accepted])
+    await adapter.replaceSource(repaired)
+    setToc(await adapter.getTableOfContents())
+    setRepairReview(null)
+    await adapter.goTo({ href: 's0', progress: 0 })
+  }
+
+  const toggleRepairProposal = (id: string): void => {
+    setRepairReview((current) => {
+      if (!current) return current
+      const accepted = new Set(current.accepted)
+      if (accepted.has(id)) accepted.delete(id)
+      else accepted.add(id)
+      return { ...current, accepted }
+    })
+  }
+
   const runLookup = async (): Promise<void> => {
     if (!selection) return
     const word = selection.text
@@ -788,6 +828,17 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
             </button>
           ))}
 
+          {book.format === 'txt' && (
+            <div className="settings-row repair-row">
+              <span className="settings-label">文本修整</span>
+              <div className="segmented">
+                <button type="button" onClick={startRepair}>
+                  检查
+                </button>
+              </div>
+            </div>
+          )}
+
           {bookmarks.length > 0 && <p className="reader-section-label">书签</p>}
           {bookmarks.map((bookmark) => (
             <div key={bookmark.id} className="bookmark-row">
@@ -838,6 +889,54 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         <ArrowRight size={14} weight="regular" aria-hidden className="reader-arrow" />
         <span className="reader-percent">{percent.toFixed(1)}%</span>
       </footer>
+
+      {repairReview !== null && (
+        <section className="repair-panel" aria-label="修整评审">
+          <div className="lookup-head">
+            <strong>修整建议({repairReview.proposals.length})</strong>
+            <button
+              type="button"
+              className="chrome-button"
+              onClick={() => setRepairReview(null)}
+              title="放弃"
+            >
+              <X size={12} weight="regular" aria-hidden />
+            </button>
+          </div>
+          {repairReview.proposals.length === 0 && (
+            <p className="lookup-empty">没有发现可修整的内容。</p>
+          )}
+          {repairReview.proposals.map((proposal) => (
+            <label
+              key={proposal.id}
+              className="repair-item"
+              aria-label={`应用${proposal.rule === 'hard-break' ? '合并断行' : '多余空格'}修整`}
+            >
+              <input
+                type="checkbox"
+                checked={repairReview.accepted.has(proposal.id)}
+                onChange={() => toggleRepairProposal(proposal.id)}
+              />
+              <span className="repair-body">
+                <span className="repair-rule">
+                  {proposal.rule === 'hard-break' ? '合并断行' : '多余空格'}
+                </span>
+                <s className="repair-before">{proposal.before.replace(/\n/g, ' ⏎ ')}</s>
+                <span className="repair-after">{proposal.after}</span>
+              </span>
+            </label>
+          ))}
+          {repairReview.proposals.length > 0 && (
+            <button
+              type="button"
+              className="reader-error-button"
+              onClick={() => void applyAcceptedRepairs()}
+            >
+              应用已选({repairReview.accepted.size}/{repairReview.proposals.length})
+            </button>
+          )}
+        </section>
+      )}
 
       {selection !== null && (
         <div

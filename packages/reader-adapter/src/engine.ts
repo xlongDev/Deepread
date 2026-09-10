@@ -27,8 +27,8 @@ import type { FoliateAnnotation, FoliateTocItem, View, ViewLocation } from 'foli
 import { Overlayer } from 'foliate-js/overlayer.js'
 import { isSupported } from './format'
 import { buildMobiBook } from './books/mobi-book'
-import { buildTextBook, decodeText } from './books/text-book'
 import { buildMarkdownBook } from './books/markdown-book'
+import { buildTextBook, decodeText } from './books/text-book'
 
 import 'foliate-js/view.js'
 
@@ -95,6 +95,7 @@ export class FoliateAdapter implements ReaderEngine {
   #layout: { fontSize?: number; lineHeight?: number; fontFamily?: 'serif' | 'sans' } = {}
   #tapTimer: ReturnType<typeof setTimeout> | undefined
   #destroyed = false
+  #adapterBuiltText: { format: 'txt' | 'md'; title: string; text: string } | null = null
 
   constructor(host: HTMLElement, callbacks: EngineCallbacks = {}) {
     this.#host = host
@@ -222,15 +223,15 @@ export class FoliateAdapter implements ReaderEngine {
           break
         }
         case 'txt': {
-          await this.#requireView().open(
-            buildTextBook(decodeText(await file.arrayBuffer()), titleFromName(file.name)),
-          )
+          const text = decodeText(await file.arrayBuffer())
+          this.#adapterBuiltText = { format: 'txt', title: titleFromName(file.name), text }
+          await this.#requireView().open(buildTextBook(text, titleFromName(file.name)))
           break
         }
         case 'md': {
-          await this.#requireView().open(
-            buildMarkdownBook(decodeText(await file.arrayBuffer()), titleFromName(file.name)),
-          )
+          const text = decodeText(await file.arrayBuffer())
+          this.#adapterBuiltText = { format: 'md', title: titleFromName(file.name), text }
+          await this.#requireView().open(buildMarkdownBook(text, titleFromName(file.name)))
           break
         }
         default:
@@ -244,8 +245,40 @@ export class FoliateAdapter implements ReaderEngine {
     this.#applyStyles()
     // The paginator only renders on explicit navigation (kernel contract), so
     // land on the book's reading start; persisted-position restore then
-    // navigates again from the UI layer.
-    await view.goToTextStart()
+    // navigates again from the UI layer. Adapter-built books (TXT/MD) must go
+    // through their anchored href — an integer index lands one column into
+    // the page strip (see sprint notes).
+    if (source.format === 'txt' || source.format === 'md') {
+      await view.goTo('s0')
+    } else {
+      await view.goToTextStart()
+    }
+  }
+
+  /** Decoded source text, only for adapter-built books (TXT/MD). */
+  getSourceText(): string | null {
+    return this.#adapterBuiltText?.text ?? null
+  }
+
+  getAdapterBuiltFormat(): 'txt' | 'md' | null {
+    return this.#adapterBuiltText?.format ?? null
+  }
+
+  /** Rebuild the book from repaired text and redisplay at its first section. */
+  async replaceSource(text: string): Promise<void> {
+    const built = this.#adapterBuiltText
+    if (!built) {
+      throw new AppError(ErrorCodes.systemValidation, '当前书籍不支持文内替换。')
+    }
+    const view = this.#requireView()
+    const book =
+      built.format === 'md'
+        ? buildMarkdownBook(text, built.title)
+        : buildTextBook(text, built.title)
+    await view.open(book)
+    this.#adapterBuiltText = { ...built, text }
+    this.#applyStyles()
+    await view.goTo('s0')
   }
 
   async close(): Promise<void> {

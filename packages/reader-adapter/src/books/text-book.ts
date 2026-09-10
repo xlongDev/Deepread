@@ -9,6 +9,7 @@
  */
 
 import type { FoliateBook, FoliateSection, FoliateTocItem } from 'foliate-js/view.js'
+
 import { byteLength } from './bytes'
 
 const PARAGRAPHS_PER_SECTION = 400
@@ -135,7 +136,12 @@ export function buildTextBook(text: string, title: string): FoliateBook {
     getTOCFragment: (doc) => doc.body,
     resolveHref: async (href) => {
       const match = /^s(\d+)$/.exec(href)
-      return { index: match ? Number(match[1]) : 0 }
+      // The anchor function routes the kernel into its precise rect-scrolling
+      // branch; index-only targets land one column into the page strip.
+      return {
+        index: match ? Number(match[1]) : 0,
+        anchor: (doc: Document): Element => doc.body,
+      }
     },
   }
 }

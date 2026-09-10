@@ -39,6 +39,9 @@ export function buildMarkdownBook(source: string, title: string): FoliateBook {
     sections: [section],
     splitTOCHref: (href) => (href === 's0' ? [0, null] : [0, null]),
     getTOCFragment: (doc) => doc.body,
-    resolveHref: async () => ({ index: 0 }),
+    resolveHref: async () => ({
+      index: 0,
+      anchor: (doc: Document): Element => doc.body,
+    }),
   }
 }

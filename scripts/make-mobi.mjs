@@ -92,7 +92,7 @@ const record0 = Buffer.concat([palmdoc, mobi, titleBuf, Buffer.alloc(2, 0)])
 
 // --- PalmDB container --------------------------------------------------------
 const numRecords = 1 + textRecords.length
-const headerLength = 78 + numRecords * 5 + 2
+const headerLength = 78 + numRecords * 8 + 2
 const header = Buffer.alloc(headerLength)
 header.write('nightferry', 0, 'latin1') // 32-byte PDB name
 header.writeUInt16BE(0, 32) // attributes
@@ -114,8 +114,10 @@ const buffers = [header]
 let offset = headerLength
 const records = [record0, ...textRecords]
 records.forEach((record, index) => {
-  header.writeUInt32BE(offset, 78 + index * 5)
-  header.writeUInt8(0, 78 + index * 5 + 4)
+  header.writeUInt32BE(offset, 78 + index * 8)
+  header.writeUInt8(0, 78 + index * 8 + 4) // attributes
+  header.writeUInt16BE(index, 78 + index * 8 + 5) // uniqueID (3 bytes, 2 used + implicit)
+  header.writeUInt8(0, 78 + index * 8 + 7)
   buffers.push(record)
   offset += record.length
 })
