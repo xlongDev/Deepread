@@ -22,6 +22,14 @@ export const COMMAND = {
   dictionaryList: 'dictionary.list',
   dictionaryRegister: 'dictionary.register',
   dictionaryRemove: 'dictionary.remove',
+  aiConfigList: 'ai.config.list',
+  aiConfigSave: 'ai.config.save',
+  aiConfigRemove: 'ai.config.remove',
+  aiChat: 'ai.chat',
+  aiCancel: 'ai.cancel',
+  secretSet: 'secret.set',
+  secretGet: 'secret.get',
+  secretDelete: 'secret.delete',
 } as const
 
 export interface SystemPingRequest {
@@ -131,6 +139,83 @@ export interface DictionaryRemoveResponse {
   readonly removed: boolean
 }
 
+/**
+ * AI provider configuration (non-secret half). The API key lives in the OS
+ * keychain, addressed by the config id — it never crosses IPC back to the UI.
+ */
+export interface AiProviderConfig {
+  readonly id: string
+  readonly name: string
+  readonly baseUrl: string
+  readonly model: string
+}
+
+export interface AiConfigListResponse {
+  readonly providers: readonly AiProviderConfig[]
+}
+
+export interface AiConfigSaveRequest {
+  readonly provider: AiProviderConfig
+  readonly apiKey: string
+}
+
+export interface AiConfigSaveResponse {
+  readonly provider: AiProviderConfig
+}
+
+export interface AiConfigRemoveRequest {
+  readonly id: string
+}
+
+export interface AiConfigRemoveResponse {
+  readonly removed: boolean
+}
+
+export interface AiChatRequest {
+  readonly taskId: string
+  readonly configId: string
+  /** OpenAI-compatible chat messages (validated by zod on the sender side). */
+  readonly messages: readonly {
+    readonly role: 'system' | 'user' | 'assistant'
+    readonly content: string
+  }[]
+  readonly temperature?: number
+}
+
+/** ai.chat returns the taskId immediately; stream events arrive via channel. */
+export interface AiChatResponse {
+  readonly taskId: string
+}
+
+export interface AiCancelRequest {
+  readonly taskId: string
+}
+
+export interface AiCancelResponse {
+  readonly cancelled: boolean
+}
+
+export interface SecretSetRequest {
+  readonly key: string
+  readonly value: string
+}
+
+export interface SecretGetRequest {
+  readonly key: string
+}
+
+export interface SecretGetResponse {
+  readonly value: string | null
+}
+
+export interface SecretDeleteRequest {
+  readonly key: string
+}
+
+export interface SecretDeleteResponse {
+  readonly deleted: boolean
+}
+
 export interface ReaderStateGetRequest {
   readonly bookHash: string
 }
@@ -189,6 +274,39 @@ export interface CommandMap {
   [COMMAND.dictionaryRemove]: {
     readonly request: DictionaryRemoveRequest
     readonly response: DictionaryRemoveResponse
+  }
+  [COMMAND.aiConfigList]: {
+    readonly request: undefined
+    readonly response: AiConfigListResponse
+  }
+  [COMMAND.aiConfigSave]: {
+    readonly request: AiConfigSaveRequest
+    readonly response: AiConfigSaveResponse
+  }
+  [COMMAND.aiConfigRemove]: {
+    readonly request: AiConfigRemoveRequest
+    readonly response: AiConfigRemoveResponse
+  }
+  /** ai.chat streams events through a Tauri Channel, not the return value. */
+  [COMMAND.aiChat]: {
+    readonly request: AiChatRequest
+    readonly response: AiChatResponse
+  }
+  [COMMAND.aiCancel]: {
+    readonly request: AiCancelRequest
+    readonly response: AiCancelResponse
+  }
+  [COMMAND.secretSet]: {
+    readonly request: { readonly key: string; readonly value: string }
+    readonly response: { readonly deleted: boolean }
+  }
+  [COMMAND.secretGet]: {
+    readonly request: { readonly key: string }
+    readonly response: { readonly value: string | null }
+  }
+  [COMMAND.secretDelete]: {
+    readonly request: { readonly key: string }
+    readonly response: { readonly deleted: boolean }
   }
 }
 
@@ -285,6 +403,51 @@ export const dictionaryRegisterResponseSchema = z.object({ dictionary: dictionar
 export const dictionaryRemoveRequestSchema = z.object({ id: z.string().min(8).max(64) })
 export const dictionaryRemoveResponseSchema = z.object({ removed: z.boolean() })
 
+const aiProviderConfigSchema = z.object({
+  id: z.string().min(8).max(64),
+  name: z.string().min(1).max(64),
+  baseUrl: z.string().url().max(512),
+  model: z.string().min(1).max(128),
+})
+
+export const aiConfigListResponseSchema = z.object({
+  providers: z.array(aiProviderConfigSchema).max(100),
+})
+export const aiConfigSaveRequestSchema = z.object({
+  provider: aiProviderConfigSchema,
+  apiKey: z.string().min(1).max(512),
+})
+export const aiConfigSaveResponseSchema = z.object({ provider: aiProviderConfigSchema })
+export const aiConfigRemoveRequestSchema = z.object({ id: z.string().min(8).max(64) })
+export const aiConfigRemoveResponseSchema = z.object({ removed: z.boolean() })
+
+export const aiChatRequestSchema = z.object({
+  taskId: z.string().min(8).max(64),
+  configId: z.string().min(8).max(64),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(['system', 'user', 'assistant']),
+        content: z.string().max(100_000),
+      }),
+    )
+    .min(1)
+    .max(100),
+  temperature: z.number().min(0).max(2).optional(),
+})
+export const aiChatResponseSchema = z.object({ taskId: z.string().min(8).max(64) })
+export const aiCancelRequestSchema = z.object({ taskId: z.string().min(8).max(64) })
+export const aiCancelResponseSchema = z.object({ cancelled: z.boolean() })
+
+export const secretSetRequestSchema = z.object({
+  key: z.string().min(4).max(128),
+  value: z.string().max(4096),
+})
+export const secretGetRequestSchema = z.object({ key: z.string().min(4).max(128) })
+export const secretGetResponseSchema = z.object({ value: z.string().nullable() })
+export const secretDeleteRequestSchema = z.object({ key: z.string().min(4).max(128) })
+export const secretDeleteResponseSchema = z.object({ deleted: z.boolean() })
+
 /** Minimal structural interface any zod schema satisfies — keeps the map version-proof. */
 export interface ResponseValidator<T> {
   parse(value: unknown): T
@@ -303,6 +466,14 @@ export const responseValidators: {
   [COMMAND.dictionaryList]: dictionaryListResponseSchema,
   [COMMAND.dictionaryRegister]: dictionaryRegisterResponseSchema,
   [COMMAND.dictionaryRemove]: dictionaryRemoveResponseSchema,
+  [COMMAND.aiConfigList]: aiConfigListResponseSchema,
+  [COMMAND.aiConfigSave]: aiConfigSaveResponseSchema,
+  [COMMAND.aiConfigRemove]: aiConfigRemoveResponseSchema,
+  [COMMAND.aiChat]: aiChatResponseSchema,
+  [COMMAND.aiCancel]: aiCancelResponseSchema,
+  [COMMAND.secretSet]: secretDeleteResponseSchema,
+  [COMMAND.secretGet]: secretGetResponseSchema,
+  [COMMAND.secretDelete]: secretDeleteResponseSchema,
 }
 
 export const requestValidators: { [K in CommandName]: ResponseValidator<unknown> | undefined } = {
@@ -316,4 +487,12 @@ export const requestValidators: { [K in CommandName]: ResponseValidator<unknown>
   [COMMAND.dictionaryList]: undefined,
   [COMMAND.dictionaryRegister]: dictionaryRegisterRequestSchema,
   [COMMAND.dictionaryRemove]: dictionaryRemoveRequestSchema,
+  [COMMAND.aiChat]: aiChatRequestSchema,
+  [COMMAND.aiCancel]: aiCancelRequestSchema,
+  [COMMAND.aiConfigSave]: aiConfigSaveRequestSchema,
+  [COMMAND.aiConfigRemove]: aiConfigRemoveRequestSchema,
+  [COMMAND.secretSet]: secretSetRequestSchema,
+  [COMMAND.secretGet]: secretGetRequestSchema,
+  [COMMAND.secretDelete]: secretDeleteRequestSchema,
+  [COMMAND.aiConfigList]: undefined,
 }

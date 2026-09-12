@@ -26,6 +26,7 @@ pub enum ErrorCode {
     StorageCorrupt,
     BookOpenFailed,
     BookUnsupportedFormat,
+    AiProviderError,
 }
 
 impl ErrorCode {
@@ -41,6 +42,7 @@ impl ErrorCode {
             Self::StorageCorrupt => "STORAGE_CORRUPT",
             Self::BookOpenFailed => "BOOK_OPEN_FAILED",
             Self::BookUnsupportedFormat => "BOOK_UNSUPPORTED_FORMAT",
+            Self::AiProviderError => "AI_PROVIDER_ERROR",
         }
     }
 }

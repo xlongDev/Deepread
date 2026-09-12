@@ -12,6 +12,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@deepread/ai-core": "workspace:*",
     "@deepread/design-system": "workspace:*",
     "@deepread/reader-adapter": "workspace:*",
     "@deepread/reader-core": "workspace:*",

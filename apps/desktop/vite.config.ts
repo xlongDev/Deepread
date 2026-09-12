@@ -8,6 +8,13 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    proxy: {
+      // dev-only path to the local mock AI server (scripts/mock-ai-server.mjs)
+      '/mock-ai': {
+        target: 'http://localhost:8787',
+        rewrite: (path) => path.replace(/^\/mock-ai/, ''),
+      },
+    },
   },
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {

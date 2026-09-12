@@ -11,6 +11,7 @@ import {
   Minus,
   Moon,
   Plus,
+  Sparkle,
   Sun,
   TextAa,
   Trash,
@@ -39,6 +40,7 @@ import {
 } from '@deepread/reader-adapter'
 import type { RepairChange } from '@deepread/reader-adapter'
 import { invokeCommand, isTauriRuntime } from '../../lib/ipc'
+import { AiDrawer } from './AiDrawer'
 import type { OpenedBook } from '../../lib/book-import'
 
 const READER_THEMES: readonly { readonly label: string; readonly theme: ReaderTheme }[] = [
@@ -164,6 +166,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     proposals: readonly RepairChange[]
     accepted: ReadonlySet<string>
   } | null>(null)
+  const [aiOpen, setAiOpen] = useState(false)
   const [panelProblem, setPanelProblem] = useState<string | null>(null)
   const dictCacheRef = useRef(
     new Map<string, { entries: ReturnType<typeof buildIndex>; dict: Uint8Array }>(),
@@ -320,6 +323,23 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
       void adapter.destroy()
     }
   }, [book])
+
+  // One bounded snippet of the current section, refreshed when the drawer
+  // opens — enough context for explanations without shipping the whole book.
+  const [aiContext, setAiContext] = useState<string | null>(null)
+  useEffect(() => {
+    if (!aiOpen) return
+    const adapter = adapterRef.current
+    if (!adapter) return
+    void adapter
+      .getText()
+      .then((text) => {
+        setAiContext(text.slice(0, 2000))
+      })
+      .catch(() => {
+        setAiContext(null)
+      })
+  }, [aiOpen])
 
   const showChrome = useCallback(() => {
     setChromeVisible(true)
@@ -667,6 +687,14 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         </button>
         <button
           type="button"
+          className={`chrome-button${aiOpen ? ' is-active' : ''}`}
+          onClick={() => setAiOpen((open) => !open)}
+          title="AI 助手"
+        >
+          <Sparkle size={18} weight="regular" aria-hidden />
+        </button>
+        <button
+          type="button"
           className="chrome-button"
           onClick={() => {
             setTocOpen((open) => !open)
@@ -936,6 +964,14 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
             </button>
           )}
         </section>
+      )}
+
+      {aiOpen && (
+        <AiDrawer
+          selection={selection?.text ?? null}
+          contextText={aiContext}
+          onClose={() => setAiOpen(false)}
+        />
       )}
 
       {selection !== null && (

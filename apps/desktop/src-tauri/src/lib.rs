@@ -4,11 +4,13 @@
 //! functions; everything below `commands/` must stay runtime-agnostic and
 //! unit-testable without a Tauri runtime.
 
+mod ai;
 mod commands;
 mod dictionary;
 mod error;
 mod events;
 mod library;
+mod secrets;
 mod state;
 mod timestamps;
 
@@ -19,6 +21,8 @@ use tauri::Emitter;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(ai::AiState::default())
+        .manage(secrets::SecretStore::Keyring)
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(if cfg!(debug_assertions) {
@@ -39,6 +43,14 @@ pub fn run() {
             dictionary::dictionary_list,
             dictionary::dictionary_register,
             dictionary::dictionary_remove,
+            ai::ai_config_list,
+            ai::ai_config_save,
+            ai::ai_config_remove,
+            ai::ai_chat,
+            ai::ai_cancel,
+            secrets::secret_set,
+            secrets::secret_get,
+            secrets::secret_delete,
         ])
         .setup(|app| {
             let payload = events::AppReadyPayload {
