@@ -235,6 +235,133 @@ pub struct AiIndexSetResponse {
 }
 
 pub const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Validate the artifact kind against the protocol enum.
+pub fn validate_artifact_kind(kind: &str) -> Result<(), AppError> {
+    match kind {
+        "summary" | "outline" | "notes" => Ok(()),
+        other => Err(
+            AppError::new(ErrorCode::SystemValidation, "未知的 artifact 类型")
+                .with_context("kind", Value::String(other.to_string())),
+        ),
+    }
+}
+
+pub fn artifact_path(base: &Path, book_hash: &str, kind: &str) -> Result<PathBuf, AppError> {
+    crate::state::validate_hash(book_hash)?;
+    validate_artifact_kind(kind)?;
+    Ok(base
+        .join("ai-artifact")
+        .join(format!("{book_hash}-{kind}.json")))
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredArtifact {
+    pub payload: Value,
+    pub created_at: String,
+}
+
+pub fn load_artifact(path: &Path) -> Result<Option<StoredArtifact>, AppError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(
+                AppError::new(ErrorCode::StorageIo, "failed to read artifact").with_cause(err),
+            );
+        }
+    };
+    if bytes.len() > MAX_ARTIFACT_BYTES {
+        return Err(AppError::new(
+            ErrorCode::StorageCorrupt,
+            "artifact is too large",
+        ));
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
+        AppError::new(ErrorCode::StorageCorrupt, "artifact is corrupted").with_cause(err)
+    })
+}
+
+pub fn store_artifact(path: &Path, artifact: &StoredArtifact) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to create artifact directory")
+                .with_cause(err)
+        })?;
+    }
+    let bytes = serde_json::to_vec(artifact).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to serialize artifact").with_cause(err)
+    })?;
+    std::fs::write(path, bytes).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to write artifact").with_cause(err)
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiArtifactGetRequest {
+    pub book_hash: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiArtifactGetResponse {
+    pub payload: Option<Value>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiArtifactSetRequest {
+    pub book_hash: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiArtifactSetResponse {
+    pub saved_at: String,
+}
+
+#[tauri::command(rename = "ai.artifact.get")]
+pub fn ai_artifact_get(
+    app: tauri::AppHandle,
+    request: AiArtifactGetRequest,
+) -> Result<AiArtifactGetResponse, AppError> {
+    let path = artifact_path(&data_dir(&app)?, &request.book_hash, &request.kind)?;
+    Ok(match load_artifact(&path)? {
+        Some(stored) => AiArtifactGetResponse {
+            payload: Some(stored.payload),
+            created_at: Some(stored.created_at),
+        },
+        None => AiArtifactGetResponse {
+            payload: None,
+            created_at: None,
+        },
+    })
+}
+
+#[tauri::command(rename = "ai.artifact.set")]
+pub fn ai_artifact_set(
+    app: tauri::AppHandle,
+    request: AiArtifactSetRequest,
+) -> Result<AiArtifactSetResponse, AppError> {
+    let path = artifact_path(&data_dir(&app)?, &request.book_hash, &request.kind)?;
+    store_artifact(
+        &path,
+        &StoredArtifact {
+            payload: request.payload,
+            created_at: crate::timestamps::rfc3339_now(),
+        },
+    )?;
+    Ok(AiArtifactSetResponse {
+        saved_at: crate::timestamps::rfc3339_now(),
+    })
+}
 
 pub fn index_path(base: &Path, book_hash: &str) -> Result<PathBuf, AppError> {
     crate::state::validate_hash(book_hash)?;
@@ -576,6 +703,28 @@ mod tests {
         store_index(&path, &index).unwrap();
         assert_eq!(load_index(&path).unwrap(), Some(index));
         assert!(index_path(&base, "../evil").is_err());
+    }
+
+    #[test]
+    fn artifact_store_round_trips_and_rejects_bad_kinds() {
+        let base = std::env::temp_dir().join(format!(
+            "reader-ai-artifact-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hash = "23821135d4c62f1428fd15ddb9e91d695402727f43b13a6eb3e9f31fc01b4072";
+        let path = artifact_path(&base, hash, "summary").unwrap();
+        let artifact = StoredArtifact {
+            payload: json!({"overview": "雪季的故事", "themes": ["灯"]}),
+            created_at: "2026-09-13T00:00:00Z".into(),
+        };
+        store_artifact(&path, &artifact).unwrap();
+        assert_eq!(load_artifact(&path).unwrap(), Some(artifact));
+        assert_eq!(load_artifact(&base.join("missing.json")).unwrap(), None);
+        assert!(artifact_path(&base, hash, "evil").is_err());
+        assert!(artifact_path(&base, "../../evil", "summary").is_err());
     }
 
     #[test]

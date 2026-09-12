@@ -60,7 +60,28 @@ createServer((request, response) => {
   request.on('data', (chunk) => bodyChunks.push(chunk))
   request.on('end', () => {
     const body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8'))
-    void body // the mock echoes the question regardless
+    const systemText = (body.messages ?? []).find((m) => m.role === 'system')?.content ?? ''
+    if (systemText.includes('"overview"') || systemText.includes('"chapters"')) {
+      // structured insight request: reply with valid JSON for zod validation
+      const summary = {
+        overview: '这是模拟摘要:小镇在化雪时节点灯候信的故事。',
+        themes: ['等待', '灯', '信'],
+        coverage: '基于章节开头,未覆盖全部正文',
+      }
+      const outline = {
+        chapters: [
+          { title: '第一章 灯', gist: '点灯迎信,雪水如信。' },
+          { title: '第二章 信', gist: '信到之日,雪化灯明。' },
+        ],
+      }
+      const payload = systemText.includes('"overview"')
+        ? JSON.stringify(summary)
+        : JSON.stringify(outline)
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+      return
+    }
     const deltas = ['这是', '一个', '模拟回答。']
     let index = 0
     const timer = setInterval(() => {

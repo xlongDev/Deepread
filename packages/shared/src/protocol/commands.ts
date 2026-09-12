@@ -30,6 +30,8 @@ export const COMMAND = {
   aiEmbed: 'ai.embed',
   aiIndexGet: 'ai.index.get',
   aiIndexSet: 'ai.index.set',
+  aiArtifactGet: 'ai.artifact.get',
+  aiArtifactSet: 'ai.artifact.set',
   secretSet: 'secret.set',
   secretGet: 'secret.get',
   secretDelete: 'secret.delete',
@@ -240,6 +242,29 @@ export interface AiIndexSetResponse {
   readonly savedAt: ISO8601
 }
 
+/** Generic per-book AI artifact (summary/outline/notes/…), JSON value payload. */
+export type AiArtifactKind = 'summary' | 'outline' | 'notes'
+
+export interface AiArtifactGetRequest {
+  readonly bookHash: string
+  readonly kind: AiArtifactKind
+}
+
+export interface AiArtifactGetResponse {
+  readonly payload: Record<string, unknown> | null
+  readonly createdAt: ISO8601 | null
+}
+
+export interface AiArtifactSetRequest {
+  readonly bookHash: string
+  readonly kind: AiArtifactKind
+  readonly payload: Record<string, unknown>
+}
+
+export interface AiArtifactSetResponse {
+  readonly savedAt: ISO8601
+}
+
 export interface SecretSetRequest {
   readonly key: string
   readonly value: string
@@ -352,6 +377,14 @@ export interface CommandMap {
   [COMMAND.aiIndexSet]: {
     readonly request: AiIndexSetRequest
     readonly response: AiIndexSetResponse
+  }
+  [COMMAND.aiArtifactGet]: {
+    readonly request: AiArtifactGetRequest
+    readonly response: AiArtifactGetResponse
+  }
+  [COMMAND.aiArtifactSet]: {
+    readonly request: AiArtifactSetRequest
+    readonly response: AiArtifactSetResponse
   }
   [COMMAND.secretSet]: {
     readonly request: { readonly key: string; readonly value: string }
@@ -520,6 +553,22 @@ export const aiIndexGetResponseSchema = z.object({ index: aiIndexPayloadSchema.n
 export const aiIndexSetRequestSchema = z.object({ bookHash, index: aiIndexPayloadSchema })
 export const aiIndexSetResponseSchema = z.object({ savedAt: iso8601 })
 
+export const artifactKindSchema = z.enum(['summary', 'outline', 'notes'])
+export const aiArtifactGetRequestSchema = z.object({
+  bookHash,
+  kind: artifactKindSchema,
+})
+export const aiArtifactGetResponseSchema = z.object({
+  payload: z.record(z.string(), z.unknown()).nullable(),
+  createdAt: iso8601.nullable(),
+})
+export const aiArtifactSetRequestSchema = z.object({
+  bookHash,
+  kind: artifactKindSchema,
+  payload: z.record(z.string(), z.unknown()),
+})
+export const aiArtifactSetResponseSchema = z.object({ savedAt: iso8601 })
+
 export const secretSetRequestSchema = z.object({
   key: z.string().min(4).max(128),
   value: z.string().max(4096),
@@ -555,6 +604,8 @@ export const responseValidators: {
   [COMMAND.aiEmbed]: aiEmbedResponseSchema,
   [COMMAND.aiIndexGet]: aiIndexGetResponseSchema,
   [COMMAND.aiIndexSet]: aiIndexSetResponseSchema,
+  [COMMAND.aiArtifactGet]: aiArtifactGetResponseSchema,
+  [COMMAND.aiArtifactSet]: aiArtifactSetResponseSchema,
   [COMMAND.secretSet]: secretDeleteResponseSchema,
   [COMMAND.secretGet]: secretGetResponseSchema,
   [COMMAND.secretDelete]: secretDeleteResponseSchema,
@@ -576,6 +627,8 @@ export const requestValidators: { [K in CommandName]: ResponseValidator<unknown>
   [COMMAND.aiEmbed]: aiEmbedRequestSchema,
   [COMMAND.aiIndexGet]: aiIndexGetRequestSchema,
   [COMMAND.aiIndexSet]: aiIndexSetRequestSchema,
+  [COMMAND.aiArtifactGet]: aiArtifactGetRequestSchema,
+  [COMMAND.aiArtifactSet]: aiArtifactSetRequestSchema,
   [COMMAND.aiConfigSave]: aiConfigSaveRequestSchema,
   [COMMAND.aiConfigRemove]: aiConfigRemoveRequestSchema,
   [COMMAND.secretSet]: secretSetRequestSchema,

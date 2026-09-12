@@ -51,6 +51,8 @@ pub fn run() {
             ai::ai_embed,
             ai::ai_index_get,
             ai::ai_index_set,
+            ai::ai_artifact_get,
+            ai::ai_artifact_set,
             secrets::secret_set,
             secrets::secret_get,
             secrets::secret_delete,

@@ -3,7 +3,9 @@ import { PaperPlaneRight, Sparkle, X } from '@phosphor-icons/react'
 import { toAppError, type AiIndexPayload, type AiProviderConfig } from '@deepread/shared'
 import {
   buildChatBody,
+  buildOutlineMessages,
   buildRagChunks,
+  buildSummaryMessages,
   buildRagMessages,
   chatEndpoint,
   citationLabels,
@@ -11,7 +13,15 @@ import {
   extractDelta,
   retrieve,
   type ChatMessage,
+  type OutlineInsight,
   type RetrievedChunk,
+  type SummaryInsight,
+} from '@deepread/ai-core'
+import {
+  outlineInsightSchema,
+  parseOutlineInsight,
+  parseSummaryInsight,
+  summaryInsightSchema,
 } from '@deepread/ai-core'
 import { invokeCommand, invokeStreamingCommand, isTauriRuntime } from '../../lib/ipc'
 
@@ -23,6 +33,7 @@ interface AiDrawerProps {
   /** Full-book sections for RAG indexing (label + text). */
   readonly sections: readonly { readonly label: string; readonly text: string }[]
   readonly bookHash: string
+  readonly title: string
   readonly onClose: () => void
 }
 
@@ -43,7 +54,14 @@ const PROVIDER_PRESETS: readonly {
   { label: 'Ollama(本地)', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
 ]
 
-export function AiDrawer({ selection, contextText, sections, bookHash, onClose }: AiDrawerProps) {
+export function AiDrawer({
+  selection,
+  contextText,
+  sections,
+  bookHash,
+  title,
+  onClose,
+}: AiDrawerProps) {
   const [providers, setProviders] = useState<readonly AiProviderConfig[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [showConfig, setShowConfig] = useState(false)
@@ -62,9 +80,15 @@ export function AiDrawer({ selection, contextText, sections, bookHash, onClose }
     'unknown',
   )
   const [citations, setCitations] = useState<ReadonlyMap<number, readonly string[]>>(new Map())
-  // Browser (non-Tauri) sessions keep the index in memory; Tauri persists it
-  // per book hash via ai.index.get/set (Rust, covered by its own tests).
+  const [summary, setSummary] = useState<SummaryInsight | null>(null)
+  const [outline, setOutline] = useState<OutlineInsight | null>(null)
+  const [insightPhase, setInsightPhase] = useState<'idle' | 'streaming'>('idle')
+  // Browser (non-Tauri) sessions keep the index and insights in memory;
+  // Tauri persists them per book hash via IPC (Rust, covered by its tests).
   const browserIndexRef = useRef<AiIndexPayload | null>(null)
+  const browserArtifactsRef = useRef(
+    new Map<string, { payload: Record<string, unknown>; createdAt: string }>(),
+  )
   const taskIdRef = useRef<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -183,6 +207,107 @@ export function AiDrawer({ selection, contextText, sections, bookHash, onClose }
       setError(toAppError(indexError).message)
     }
   }, [activeId, bookHash, providers, sections])
+
+  // Load persisted insights once per drawer open.
+  useEffect(() => {
+    let cancelled = false
+    for (const kind of ['summary', 'outline'] as const) {
+      const read = isTauriRuntime()
+        ? invokeCommand('ai.artifact.get', { bookHash, kind }).then((response) =>
+            response.payload === null
+              ? null
+              : { payload: response.payload, createdAt: response.createdAt ?? '' },
+          )
+        : Promise.resolve(browserArtifactsRef.current.get(`${bookHash}-${kind}`) ?? null)
+      read
+        .then((stored) => {
+          if (cancelled || stored === null) return
+          if (kind === 'summary') setSummary(summaryInsightSchema.parse(stored.payload))
+          else setOutline(outlineInsightSchema.parse(stored.payload))
+        })
+        .catch(() => {
+          // Corrupted/stale artifacts are ignored; regeneration overwrites.
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [bookHash])
+
+  // Generate a structured insight via the streaming chat path; validates the
+  // assembled JSON with zod before persisting (spec §118).
+  const generateInsight = useCallback(
+    async (kind: 'summary' | 'outline'): Promise<void> => {
+      if (insightPhase === 'streaming' || sections.length === 0) return
+      const taskId = `task-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
+      const insightMessages =
+        kind === 'summary'
+          ? buildSummaryMessages(sections, title)
+          : buildOutlineMessages(sections, title)
+      setInsightPhase('streaming')
+      setError(null)
+      let full = ''
+      const parser = createSseParser((data) => {
+        const delta = extractDelta(data)
+        if (delta.type === 'delta') full += delta.text
+      })
+      try {
+        if (isTauriRuntime() && activeId) {
+          await invokeStreamingCommand(
+            'ai.chat',
+            { taskId, configId: activeId, messages: insightMessages },
+            (event) => {
+              if (event.type === 'chunk') parser.push(event.data)
+            },
+          )
+        } else {
+          const response = await fetch(chatEndpoint('/mock-ai/v1'), {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: 'Bearer sk-mock-test-key',
+            },
+            body: buildChatBody({ model: 'mock-model', messages: insightMessages }),
+          })
+          if (!response.ok || !response.body) {
+            throw new Error(`mock 服务错误(${response.status})`)
+          }
+          const reader = response.body.getReader()
+          const decoder = new TextDecoder()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            parser.push(decoder.decode(value, { stream: true }))
+          }
+        }
+        parser.end()
+        const insight = kind === 'summary' ? parseSummaryInsight(full) : parseOutlineInsight(full)
+        const payload = insight as unknown as Record<string, unknown>
+        if (isTauriRuntime()) {
+          await invokeCommand('ai.artifact.set', { bookHash, kind, payload })
+        } else {
+          browserArtifactsRef.current.set(`${bookHash}-${kind}`, {
+            payload,
+            createdAt: new Date().toISOString(),
+          })
+        }
+        if (kind === 'summary') {
+          setSummary(insight as SummaryInsight)
+        } else {
+          setOutline(insight as OutlineInsight)
+        }
+      } catch (insightError) {
+        setError(
+          insightError instanceof Error && insightError.message.includes('JSON')
+            ? `AI 输出未通过校验,请重试。(${insightError.message})`
+            : toAppError(insightError).message,
+        )
+      } finally {
+        setInsightPhase('idle')
+      }
+    },
+    [activeId, bookHash, insightPhase, sections, title],
+  )
 
   const send = useCallback(async (): Promise<void> => {
     const question = input.trim()
@@ -511,6 +636,58 @@ export function AiDrawer({ selection, contextText, sections, bookHash, onClose }
           </div>
         </div>
       )}
+
+      <section className="ai-insights" aria-label="本书洞察">
+        <div className="settings-row">
+          <span className="settings-label">本书洞察(基于章节开头)</span>
+          <div className="segmented">
+            <button
+              type="button"
+              onClick={() => void generateInsight('summary')}
+              disabled={insightPhase === 'streaming'}
+            >
+              {insightPhase === 'streaming' && summary === null
+                ? '生成中…'
+                : summary === null
+                  ? '生成摘要'
+                  : '重新生成摘要'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void generateInsight('outline')}
+              disabled={insightPhase === 'streaming'}
+            >
+              {insightPhase === 'streaming' && outline === null
+                ? '生成中…'
+                : outline === null
+                  ? '生成大纲'
+                  : '重新生成大纲'}
+            </button>
+          </div>
+        </div>
+        {summary !== null && (
+          <div className="ai-insight">
+            <p className="ai-insight-overview">{summary.overview}</p>
+            <div className="ai-citations">
+              {summary.themes.map((theme) => (
+                <span key={theme} className="ai-citation">
+                  {theme}
+                </span>
+              ))}
+            </div>
+            <p className="ai-privacy">{summary.coverage}</p>
+          </div>
+        )}
+        {outline !== null && (
+          <div className="ai-insight">
+            {outline.chapters.map((chapter) => (
+              <p key={chapter.title} className="ai-insight-outline">
+                <strong>{chapter.title}</strong> {chapter.gist}
+              </p>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="ai-messages">
         {messages.length === 0 && (

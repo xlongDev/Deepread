@@ -982,6 +982,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           contextText={aiContext}
           sections={ragSections}
           bookHash={book.hash}
+          title={title}
           onClose={() => setAiOpen(false)}
         />
       )}

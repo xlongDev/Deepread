@@ -870,3 +870,36 @@ button {
   font-size: var(--font-size-sm);
   padding: 1px 8px;
 }
+
+/* ---------- AI insights (Phase 4) ---------- */
+
+.ai-insights {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ai-insight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.ai-insight-overview {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+}
+
+.ai-insight-outline {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.ai-insight-outline strong {
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-medium);
+}
