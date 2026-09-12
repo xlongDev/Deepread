@@ -14,5 +14,11 @@ export {
   lookupWord,
   sanitizeDefinitionHtml,
 } from './dictionary/stardict'
-export { buildTextBook, decodeText, escapeHtml, splitParagraphs } from './books/text-book'
+export {
+  buildTextBook,
+  chapterSections,
+  decodeText,
+  escapeHtml,
+  splitParagraphs,
+} from './books/text-book'
 export { buildMarkdownBook, markdownToHtml } from './books/markdown-book'

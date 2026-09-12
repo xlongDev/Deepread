@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildTextBook,
+  chapterSections,
   decodeText,
   escapeHtml,
   isChapterTitle,
@@ -78,6 +79,20 @@ describe('buildTextBook', () => {
     expect(isChapterTitle('第一章 启程')).toBe(true)
     expect(isDialogue('“对话在这里。”')).toBe(true)
     expect(isDialogue('普通叙述。')).toBe(false)
+  })
+})
+
+describe('chapterSections', () => {
+  it('groups paragraphs under their chapter labels', () => {
+    const text = ['开头的话。', '第一章 启程', '正文甲。', '第二章 夜谈', '正文乙。'].join('\n\n')
+    const sections = chapterSections(text)
+    expect(sections.map((section) => section.label)).toEqual(['开篇', '第一章 启程', '第二章 夜谈'])
+    expect(sections[0]?.text).toBe('开头的话。')
+    expect(sections[2]?.text).toContain('正文乙。')
+  })
+
+  it('falls back to a single 开篇 section without markers', () => {
+    expect(chapterSections('只有一段。')).toHaveLength(1)
   })
 })
 

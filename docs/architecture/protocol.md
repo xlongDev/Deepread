@@ -53,6 +53,19 @@
 | Errors      | `BOOK_UNSUPPORTED_FORMAT`、`BOOK_OPEN_FAILED`、`SYSTEM_VALIDATION`(hash 非法)、`STORAGE_IO/CORRUPT` |
 | 约定        | 文件保留原位(永不移动/删除用户文件);内核经 asset 协议流式读取,导入时按文件逐一授权 scope            |
 
+### `ai.*` 与 `secret.*`(Phase 3)
+
+| 命令                         | 请求 → 响应                                                                                            | 说明                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| `ai.config.list/save/remove` | Provider 配置(不含密钥)→ 保存时密钥写入钥匙串                                                          | 配置存 `ai-config.json`;密钥地址 `ai.key.<id>` |
+| `ai.chat`                    | `{ taskId, configId, messages }` → `{ taskId }`;SSE 经 **Channel** 流回(chunk/done/cancelled/error 帧) | Rust 代持密钥直连上游;前端只收流               |
+| `ai.cancel`                  | `{ taskId }` → `{ cancelled }`                                                                         | 原子旗标,流循环即时生效                        |
+| `ai.embed`                   | `{ taskId, configId, texts[] }` → `{ vectors[][] }`                                                    | POST `{base}/embeddings`,密钥服务端解析        |
+| `ai.index.get/set`           | 按书籍哈希存取 `{ chunks[label,text,vector], embeddingModel, createdAt }`                              | `ai-index/<hash>.json`,64MB 上限 + 损坏防护    |
+| `secret.set/get/delete`      | 钥匙串优先,无服务时降级 0600 文件                                                                      | 密钥永不回传 UI(仅 AI HTTP 客户端使用)         |
+
+错误码:`AI_PROVIDER_ERROR`(连接失败/上游非 2xx/响应不合法,多数可重试)、`STORAGE_IO/CORRUPT`。
+
 ## Event 目录(Phase 0)
 
 ### `app.ready`(v1)

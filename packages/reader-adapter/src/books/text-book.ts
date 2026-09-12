@@ -81,6 +81,17 @@ function sectionHtml(
   ].join('\n')
 }
 
+/** Group raw source text into chapter-labeled sections (RAG indexing). */
+export function chapterSections(text: string): { label: string; text: string }[] {
+  const sections: { label: string; text: string }[] = [{ label: '开篇', text: '' }]
+  for (const paragraph of splitParagraphs(text)) {
+    if (isChapterTitle(paragraph)) sections.push({ label: paragraph, text: '' })
+    const current = sections[sections.length - 1]
+    if (current) current.text = current.text ? `${current.text}\n\n${paragraph}` : paragraph
+  }
+  return sections.filter((section) => section.text.trim().length > 0)
+}
+
 export function buildTextBook(text: string, title: string): FoliateBook {
   const paragraphs = splitParagraphs(text)
 

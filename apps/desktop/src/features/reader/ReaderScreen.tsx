@@ -29,6 +29,7 @@ import type { ReaderTheme, TocItem } from '@deepread/reader-core'
 import {
   applyRepair,
   buildIndex,
+  chapterSections,
   FoliateAdapter,
   reviewRepair,
   inflateGzip,
@@ -340,8 +341,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         setAiContext(text.slice(0, 2000))
         const source = adapter.getSourceText()
         if (source !== null) {
-          const labels = ['原书正文']
-          setRagSections([{ label: labels[0] ?? '正文', text: source }])
+          setRagSections(chapterSections(source))
         } else {
           setRagSections([{ label: '原书正文', text: text.slice(0, 20_000) }])
         }
