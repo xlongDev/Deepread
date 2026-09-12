@@ -327,6 +327,9 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   // One bounded snippet of the current section, refreshed when the drawer
   // opens — enough context for explanations without shipping the whole book.
   const [aiContext, setAiContext] = useState<string | null>(null)
+  // RAG sections: adapter-built books expose their source directly; kernel
+  // books fall back to a single section from the live contents.
+  const [ragSections, setRagSections] = useState<readonly { label: string; text: string }[]>([])
   useEffect(() => {
     if (!aiOpen) return
     const adapter = adapterRef.current
@@ -335,6 +338,13 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
       .getText()
       .then((text) => {
         setAiContext(text.slice(0, 2000))
+        const source = adapter.getSourceText()
+        if (source !== null) {
+          const labels = ['原书正文']
+          setRagSections([{ label: labels[0] ?? '正文', text: source }])
+        } else {
+          setRagSections([{ label: '原书正文', text: text.slice(0, 20_000) }])
+        }
       })
       .catch(() => {
         setAiContext(null)
@@ -970,6 +980,8 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         <AiDrawer
           selection={selection?.text ?? null}
           contextText={aiContext}
+          sections={ragSections}
+          bookHash={book.hash}
           onClose={() => setAiOpen(false)}
         />
       )}

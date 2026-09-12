@@ -27,6 +27,9 @@ export const COMMAND = {
   aiConfigRemove: 'ai.config.remove',
   aiChat: 'ai.chat',
   aiCancel: 'ai.cancel',
+  aiEmbed: 'ai.embed',
+  aiIndexGet: 'ai.index.get',
+  aiIndexSet: 'ai.index.set',
   secretSet: 'secret.set',
   secretGet: 'secret.get',
   secretDelete: 'secret.delete',
@@ -148,6 +151,8 @@ export interface AiProviderConfig {
   readonly name: string
   readonly baseUrl: string
   readonly model: string
+  /** Embedding model for RAG; defaults to the chat model when absent. */
+  readonly embeddingModel?: string
 }
 
 export interface AiConfigListResponse {
@@ -193,6 +198,46 @@ export interface AiCancelRequest {
 
 export interface AiCancelResponse {
   readonly cancelled: boolean
+}
+
+export interface AiEmbedRequest {
+  readonly taskId: string
+  readonly configId: string
+  readonly texts: readonly string[]
+}
+
+export interface AiEmbedResponse {
+  readonly vectors: readonly (readonly number[])[]
+}
+
+/** One indexed chunk of a book (chapter-labeled, embedded). */
+export interface AiIndexChunk {
+  readonly label: string
+  readonly text: string
+  readonly vector: readonly number[]
+}
+
+export interface AiIndexPayload {
+  readonly chunks: readonly AiIndexChunk[]
+  readonly embeddingModel: string
+  readonly createdAt: ISO8601
+}
+
+export interface AiIndexGetRequest {
+  readonly bookHash: string
+}
+
+export interface AiIndexGetResponse {
+  readonly index: AiIndexPayload | null
+}
+
+export interface AiIndexSetRequest {
+  readonly bookHash: string
+  readonly index: AiIndexPayload
+}
+
+export interface AiIndexSetResponse {
+  readonly savedAt: ISO8601
 }
 
 export interface SecretSetRequest {
@@ -295,6 +340,18 @@ export interface CommandMap {
   [COMMAND.aiCancel]: {
     readonly request: AiCancelRequest
     readonly response: AiCancelResponse
+  }
+  [COMMAND.aiEmbed]: {
+    readonly request: AiEmbedRequest
+    readonly response: AiEmbedResponse
+  }
+  [COMMAND.aiIndexGet]: {
+    readonly request: AiIndexGetRequest
+    readonly response: AiIndexGetResponse
+  }
+  [COMMAND.aiIndexSet]: {
+    readonly request: AiIndexSetRequest
+    readonly response: AiIndexSetResponse
   }
   [COMMAND.secretSet]: {
     readonly request: { readonly key: string; readonly value: string }
@@ -408,6 +465,7 @@ const aiProviderConfigSchema = z.object({
   name: z.string().min(1).max(64),
   baseUrl: z.string().url().max(512),
   model: z.string().min(1).max(128),
+  embeddingModel: z.string().min(1).max(128).optional(),
 })
 
 export const aiConfigListResponseSchema = z.object({
@@ -438,6 +496,29 @@ export const aiChatRequestSchema = z.object({
 export const aiChatResponseSchema = z.object({ taskId: z.string().min(8).max(64) })
 export const aiCancelRequestSchema = z.object({ taskId: z.string().min(8).max(64) })
 export const aiCancelResponseSchema = z.object({ cancelled: z.boolean() })
+
+export const aiEmbedRequestSchema = z.object({
+  taskId: z.string().min(8).max(64),
+  configId: z.string().min(8).max(64),
+  texts: z.array(z.string().max(20_000)).min(1).max(500),
+})
+export const aiEmbedResponseSchema = z.object({
+  vectors: z.array(z.array(z.number()).min(1).max(4096)).max(500),
+})
+const aiIndexChunkSchema = z.object({
+  label: z.string().min(1).max(200),
+  text: z.string().max(20_000),
+  vector: z.array(z.number()).min(1).max(4096),
+})
+export const aiIndexPayloadSchema = z.object({
+  chunks: z.array(aiIndexChunkSchema).max(5000),
+  embeddingModel: z.string().min(1).max(128),
+  createdAt: iso8601,
+})
+export const aiIndexGetRequestSchema = z.object({ bookHash })
+export const aiIndexGetResponseSchema = z.object({ index: aiIndexPayloadSchema.nullable() })
+export const aiIndexSetRequestSchema = z.object({ bookHash, index: aiIndexPayloadSchema })
+export const aiIndexSetResponseSchema = z.object({ savedAt: iso8601 })
 
 export const secretSetRequestSchema = z.object({
   key: z.string().min(4).max(128),
@@ -471,6 +552,9 @@ export const responseValidators: {
   [COMMAND.aiConfigRemove]: aiConfigRemoveResponseSchema,
   [COMMAND.aiChat]: aiChatResponseSchema,
   [COMMAND.aiCancel]: aiCancelResponseSchema,
+  [COMMAND.aiEmbed]: aiEmbedResponseSchema,
+  [COMMAND.aiIndexGet]: aiIndexGetResponseSchema,
+  [COMMAND.aiIndexSet]: aiIndexSetResponseSchema,
   [COMMAND.secretSet]: secretDeleteResponseSchema,
   [COMMAND.secretGet]: secretGetResponseSchema,
   [COMMAND.secretDelete]: secretDeleteResponseSchema,
@@ -489,6 +573,9 @@ export const requestValidators: { [K in CommandName]: ResponseValidator<unknown>
   [COMMAND.dictionaryRemove]: dictionaryRemoveRequestSchema,
   [COMMAND.aiChat]: aiChatRequestSchema,
   [COMMAND.aiCancel]: aiCancelRequestSchema,
+  [COMMAND.aiEmbed]: aiEmbedRequestSchema,
+  [COMMAND.aiIndexGet]: aiIndexGetRequestSchema,
+  [COMMAND.aiIndexSet]: aiIndexSetRequestSchema,
   [COMMAND.aiConfigSave]: aiConfigSaveRequestSchema,
   [COMMAND.aiConfigRemove]: aiConfigRemoveRequestSchema,
   [COMMAND.secretSet]: secretSetRequestSchema,

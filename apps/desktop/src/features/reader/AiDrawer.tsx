@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PaperPlaneRight, Sparkle, X } from '@phosphor-icons/react'
-import { toAppError, type AiProviderConfig } from '@deepread/shared'
+import { toAppError, type AiIndexPayload, type AiProviderConfig } from '@deepread/shared'
 import {
   buildChatBody,
+  buildRagChunks,
+  buildRagMessages,
   chatEndpoint,
+  citationLabels,
   createSseParser,
   extractDelta,
+  retrieve,
   type ChatMessage,
+  type RetrievedChunk,
 } from '@deepread/ai-core'
 import { invokeCommand, invokeStreamingCommand, isTauriRuntime } from '../../lib/ipc'
 
@@ -15,8 +20,13 @@ interface AiDrawerProps {
   readonly selection: string | null
   /** Chapter/plain text snippet to give the assistant context. */
   readonly contextText: string | null
+  /** Full-book sections for RAG indexing (label + text). */
+  readonly sections: readonly { readonly label: string; readonly text: string }[]
+  readonly bookHash: string
   readonly onClose: () => void
 }
+
+export type AiScope = 'selection' | 'chapter' | 'book'
 
 type ChatUiMessage = ChatMessage & { readonly streaming?: boolean }
 
@@ -33,7 +43,7 @@ const PROVIDER_PRESETS: readonly {
   { label: 'Ollama(本地)', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
 ]
 
-export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
+export function AiDrawer({ selection, contextText, sections, bookHash, onClose }: AiDrawerProps) {
   const [providers, setProviders] = useState<readonly AiProviderConfig[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [showConfig, setShowConfig] = useState(false)
@@ -47,6 +57,14 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
   const [input, setInput] = useState('')
   const [phase, setPhase] = useState<StreamPhase>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [scope, setScope] = useState<AiScope>('chapter')
+  const [indexStatus, setIndexStatus] = useState<'unknown' | 'missing' | 'ready' | 'building'>(
+    'unknown',
+  )
+  const [citations, setCitations] = useState<ReadonlyMap<number, readonly string[]>>(new Map())
+  // Browser (non-Tauri) sessions keep the index in memory; Tauri persists it
+  // per book hash via ai.index.get/set (Rust, covered by its own tests).
+  const browserIndexRef = useRef<AiIndexPayload | null>(null)
   const taskIdRef = useRef<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -112,6 +130,60 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
     }
   }, [])
 
+  const buildIndex = useCallback(async (): Promise<void> => {
+    if (sections.length === 0) return
+    setIndexStatus('building')
+    try {
+      const chunks = buildRagChunks(sections)
+      let vectors: readonly (readonly number[])[]
+      if (isTauriRuntime() && activeId) {
+        const response = await invokeCommand('ai.embed', {
+          taskId: `task-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
+          configId: activeId,
+          texts: chunks.map((chunk) => chunk.text),
+        })
+        vectors = response.vectors
+      } else {
+        const response = await fetch('/mock-ai/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer sk-mock-test-key',
+          },
+          body: JSON.stringify({
+            model: 'mock-embedding',
+            input: chunks.map((chunk) => chunk.text),
+          }),
+        })
+        if (!response.ok) throw new Error(`mock embeddings 错误(${response.status})`)
+        const payload = (await response.json()) as { data: { embedding: number[] }[] }
+        vectors = payload.data.map((item) => item.embedding)
+      }
+      const index: AiIndexPayload = {
+        chunks: chunks.map((chunk, i) => ({
+          label: chunk.label,
+          text: chunk.text,
+          vector: vectors[i] ?? [],
+        })),
+        embeddingModel:
+          providers.find((provider) => provider.id === activeId)?.embeddingModel ??
+          providers.find((provider) => provider.id === activeId)?.model ??
+          'mock-model',
+        createdAt: new Date().toISOString(),
+      }
+      if (isTauriRuntime()) {
+        await invokeCommand('ai.index.set', { bookHash, index })
+      } else {
+        browserIndexRef.current = index
+      }
+      setIndexStatus('ready')
+      setError(null)
+    } catch (indexError) {
+      setIndexStatus('missing')
+      setError(toAppError(indexError).message)
+    }
+  }, [activeId, bookHash, providers, sections])
+
   const send = useCallback(async (): Promise<void> => {
     const question = input.trim()
     // Browser mode goes through the mock path and needs no configId.
@@ -122,20 +194,58 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
     const taskId = `task-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
     taskIdRef.current = taskId
 
-    // System context: the book snippet/selection, clearly bounded (spec §34).
-    const systemContext = [contextText, selection]
-      .filter((text): text is string => text !== null && text.trim().length > 0)
-      .map((text) => text.slice(0, 2000))
-      .join('\n---\n')
-    const outbound: ChatMessage[] = [
-      ...(systemContext
-        ? [{ role: 'system' as const, content: `以下是用户正在阅读的内容片段:\n${systemContext}` }]
-        : []),
-      ...messages
-        .filter((message) => message.role !== 'system')
-        .map(({ role, content }) => ({ role, content })),
-      { role: 'user' as const, content: question },
-    ]
+    // System context per scope (spec §34): selection / current chapter / RAG.
+    let outbound: readonly ChatMessage[]
+    if (scope === 'book') {
+      const index = isTauriRuntime()
+        ? (await invokeCommand('ai.index.get', { bookHash })).index
+        : browserIndexRef.current
+      if (!index || index.chunks.length === 0) {
+        setError('全书模式需要先建立索引。')
+        return
+      }
+      // Query embedding: mock path embeds client-side; Tauri uses ai.embed.
+      let queryVector: readonly number[]
+      if (isTauriRuntime() && activeId) {
+        const embedResponse = await invokeCommand('ai.embed', {
+          taskId: `task-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
+          configId: activeId,
+          texts: [question],
+        })
+        queryVector = embedResponse.vectors[0] ?? []
+      } else {
+        const embedFetch = await fetch('/mock-ai/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer sk-mock-test-key',
+          },
+          body: JSON.stringify({ model: 'mock-embedding', input: [question] }),
+        })
+        const payload = (await embedFetch.json()) as { data: { embedding: number[] }[] }
+        queryVector = payload.data[0]?.embedding ?? []
+      }
+      const retrieved: readonly RetrievedChunk[] = retrieve(index.chunks, queryVector)
+      setCitations(new Map([[messages.length + 1, citationLabels(retrieved)]]))
+      outbound = buildRagMessages(question, retrieved, messages)
+    } else {
+      const scoped = scope === 'selection' ? selection : contextText
+      const systemContext = scoped?.trim() ? scoped.slice(0, 2000) : null
+      outbound = [
+        ...(systemContext
+          ? [
+              {
+                role: 'system' as const,
+                content: `以下是用户正在阅读的内容片段:\n${systemContext}`,
+              },
+            ]
+          : []),
+        ...messages
+          .filter((message) => message.role !== 'system')
+          .map(({ role, content }) => ({ role, content })),
+        { role: 'user' as const, content: question },
+      ]
+    }
 
     setMessages((current) => [
       ...current,
@@ -231,7 +341,7 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
       setError(toAppError(chatError).message)
       taskIdRef.current = null
     }
-  }, [activeId, contextText, input, messages, phase, selection])
+  }, [activeId, bookHash, contextText, input, messages, phase, scope, selection])
 
   const cancel = useCallback(async (): Promise<void> => {
     const taskId = taskIdRef.current
@@ -353,6 +463,55 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
         </section>
       )}
 
+      <div className="segmented ai-scope">
+        <button
+          type="button"
+          className={scope === 'selection' ? 'is-active' : ''}
+          onClick={() => setScope('selection')}
+          disabled={!selection}
+          title={selection ? '把选中文本作为上下文' : '先在正文中选一段文字'}
+        >
+          选中文本
+        </button>
+        <button
+          type="button"
+          className={scope === 'chapter' ? 'is-active' : ''}
+          onClick={() => setScope('chapter')}
+        >
+          当前章节
+        </button>
+        <button
+          type="button"
+          className={scope === 'book' ? 'is-active' : ''}
+          onClick={() => setScope('book')}
+        >
+          全书 RAG
+        </button>
+      </div>
+
+      {scope === 'book' && (
+        <div className="settings-row">
+          <span className="settings-label">
+            {indexStatus === 'ready'
+              ? '索引已就绪'
+              : indexStatus === 'building'
+                ? '正在建立索引…'
+                : indexStatus === 'missing'
+                  ? '尚无索引'
+                  : '索引状态未知'}
+          </span>
+          <div className="segmented">
+            <button
+              type="button"
+              onClick={() => void buildIndex()}
+              disabled={indexStatus === 'building'}
+            >
+              {indexStatus === 'building' ? '建立中' : '建立索引'}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="ai-messages">
         {messages.length === 0 && (
           <p className="lookup-empty">
@@ -362,8 +521,19 @@ export function AiDrawer({ selection, contextText, onClose }: AiDrawerProps) {
           </p>
         )}
         {messages.map((message, index) => (
-          <div key={index} className={`ai-msg ai-msg-${message.role}`}>
-            {message.content || (message.streaming ? '…' : '')}
+          <div key={index} className={`ai-msg-wrap ai-msg-wrap-${message.role}`}>
+            <div className={`ai-msg ai-msg-${message.role}`}>
+              {message.content || (message.streaming ? '…' : '')}
+            </div>
+            {message.role === 'assistant' && citations.get(index) !== undefined && (
+              <div className="ai-citations">
+                {citations.get(index)?.map((label) => (
+                  <span key={label} className="ai-citation">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         ))}
         <div ref={messagesEndRef} />

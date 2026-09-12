@@ -33,6 +33,8 @@ pub struct AiProviderConfig {
     pub name: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -176,6 +178,167 @@ pub struct AiCancelResponse {
     pub cancelled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiEmbedRequest {
+    #[allow(dead_code)] // protocol field; the embed call is not cancellable in-flight
+    pub task_id: String,
+    pub config_id: String,
+    pub texts: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEmbedResponse {
+    pub vectors: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIndexChunk {
+    pub label: String,
+    pub text: String,
+    pub vector: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIndexPayload {
+    pub chunks: Vec<AiIndexChunk>,
+    pub embedding_model: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiIndexGetRequest {
+    pub book_hash: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIndexGetResponse {
+    pub index: Option<AiIndexPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiIndexSetRequest {
+    pub book_hash: String,
+    pub index: AiIndexPayload,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiIndexSetResponse {
+    pub saved_at: String,
+}
+
+pub const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
+
+pub fn index_path(base: &Path, book_hash: &str) -> Result<PathBuf, AppError> {
+    crate::state::validate_hash(book_hash)?;
+    Ok(base.join("ai-index").join(format!("{book_hash}.json")))
+}
+
+pub fn load_index(path: &Path) -> Result<Option<AiIndexPayload>, AppError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(
+                AppError::new(ErrorCode::StorageIo, "failed to read ai index").with_cause(err),
+            );
+        }
+    };
+    if bytes.len() > MAX_INDEX_BYTES {
+        return Err(AppError::new(
+            ErrorCode::StorageCorrupt,
+            "ai index is too large",
+        ));
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
+        AppError::new(ErrorCode::StorageCorrupt, "ai index is corrupted").with_cause(err)
+    })
+}
+
+pub fn store_index(path: &Path, index: &AiIndexPayload) -> Result<(), AppError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to create index directory").with_cause(err)
+        })?;
+    }
+    let bytes = serde_json::to_vec(index).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to serialize ai index").with_cause(err)
+    })?;
+    std::fs::write(path, bytes).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to write ai index").with_cause(err)
+    })
+}
+
+/// POST /embeddings through the provider and return the vectors.
+pub async fn embed_texts(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    model: &str,
+    texts: &[String],
+) -> Result<Vec<Vec<f64>>, AppError> {
+    let response = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&json!({ "model": model, "input": texts }))
+        .send()
+        .await
+        .map_err(|err| {
+            AppError::new(ErrorCode::AiProviderError, "无法连接 embeddings 服务")
+                .with_cause(err)
+                .retryable()
+        })?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        return Err(AppError::new(
+            ErrorCode::AiProviderError,
+            format!("embeddings 服务返回错误({status})"),
+        )
+        .with_context("body", Value::String(text.chars().take(400).collect())));
+    }
+    let payload: Value = response.json().await.map_err(|err| {
+        AppError::new(ErrorCode::AiProviderError, "embeddings 响应不是合法 JSON").with_cause(err)
+    })?;
+    let mut vectors: Vec<(usize, Vec<f64>)> = payload
+        .get("data")
+        .and_then(|data| data.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| {
+                    let index = item.get("index")?.as_u64()? as usize;
+                    let embedding = item.get("embedding")?.as_array()?;
+                    let vector: Vec<f64> = embedding
+                        .iter()
+                        .map(|value| value.as_f64().unwrap_or(0.0))
+                        .collect();
+                    Some((index, vector))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    vectors.sort_by_key(|(index, _)| *index);
+    if vectors.len() != texts.len() {
+        return Err(AppError::new(
+            ErrorCode::AiProviderError,
+            format!(
+                "embeddings 数量不符:期望 {},实际 {}",
+                texts.len(),
+                vectors.len()
+            ),
+        ));
+    }
+    Ok(vectors.into_iter().map(|(_, vector)| vector).collect())
+}
+
 /// Pure helper: the upstream chat-completions URL for a configured base URL.
 pub fn chat_endpoint(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
@@ -312,6 +475,54 @@ pub async fn ai_chat(
     Ok(AiChatResponse { task_id })
 }
 
+#[tauri::command(rename = "ai.embed")]
+pub async fn ai_embed(
+    app: tauri::AppHandle,
+    secrets: State<'_, SecretStore>,
+    request: AiEmbedRequest,
+) -> Result<AiEmbedResponse, AppError> {
+    let base = data_dir(&app)?;
+    let config = load_configs(&base)
+        .providers
+        .into_iter()
+        .find(|p| p.id == request.config_id)
+        .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "AI 服务配置不存在"))?;
+    let key = format!("ai.key.{}", request.config_id);
+    let api_key = crate::secrets::get_secret(&secrets, &base, &key)?
+        .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "请先填写该服务的 API Key"))?;
+    let model = config
+        .embedding_model
+        .clone()
+        .unwrap_or_else(|| config.model.clone());
+    let url = format!("{}/embeddings", config.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let vectors = embed_texts(&client, &url, &api_key, &model, &request.texts).await?;
+    Ok(AiEmbedResponse { vectors })
+}
+
+#[tauri::command(rename = "ai.index.get")]
+pub fn ai_index_get(
+    app: tauri::AppHandle,
+    request: AiIndexGetRequest,
+) -> Result<AiIndexGetResponse, AppError> {
+    let path = index_path(&data_dir(&app)?, &request.book_hash)?;
+    Ok(AiIndexGetResponse {
+        index: load_index(&path)?,
+    })
+}
+
+#[tauri::command(rename = "ai.index.set")]
+pub fn ai_index_set(
+    app: tauri::AppHandle,
+    request: AiIndexSetRequest,
+) -> Result<AiIndexSetResponse, AppError> {
+    let path = index_path(&data_dir(&app)?, &request.book_hash)?;
+    store_index(&path, &request.index)?;
+    Ok(AiIndexSetResponse {
+        saved_at: crate::timestamps::rfc3339_now(),
+    })
+}
+
 #[tauri::command(rename = "ai.cancel")]
 pub async fn ai_cancel(
     state: State<'_, AiState>,
@@ -343,6 +554,31 @@ mod tests {
     }
 
     #[test]
+    fn index_store_round_trips() {
+        let base = std::env::temp_dir().join(format!(
+            "reader-ai-index-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hash = "23821135d4c62f1428fd15ddb9e91d695402727f43b13a6eb3e9f31fc01b4072";
+        let path = index_path(&base, hash).unwrap();
+        let index = AiIndexPayload {
+            chunks: vec![AiIndexChunk {
+                label: "第一章".into(),
+                text: "镇上的人把灯点亮。".into(),
+                vector: vec![0.1, 0.9],
+            }],
+            embedding_model: "mock-embedding".into(),
+            created_at: "2026-09-13T00:00:00Z".into(),
+        };
+        store_index(&path, &index).unwrap();
+        assert_eq!(load_index(&path).unwrap(), Some(index));
+        assert!(index_path(&base, "../evil").is_err());
+    }
+
+    #[test]
     fn config_store_round_trips() {
         let base = std::env::temp_dir().join(format!(
             "reader-ai-config-{}",
@@ -356,6 +592,7 @@ mod tests {
             name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com/v1".into(),
             model: "deepseek-chat".into(),
+            embedding_model: None,
         };
         let mut store = load_configs(&base);
         assert!(store.providers.is_empty());

@@ -838,3 +838,35 @@ button {
   gap: var(--space-xs);
   align-items: center;
 }
+
+/* ---------- AI citations ---------- */
+
+.ai-msg-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 88%;
+}
+
+.ai-msg-wrap-user {
+  align-self: flex-end;
+}
+
+.ai-msg-wrap-assistant {
+  align-self: flex-start;
+}
+
+.ai-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ai-citation {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 1px 8px;
+}
