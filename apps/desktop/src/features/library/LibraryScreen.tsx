@@ -215,7 +215,9 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
   }, [loadBooks])
 
   // Real cover extraction per book (kernel covers for EPUB/MOBI, PDF.js page 1
-  // for PDF); results cached in sessionStorage so reopening the shelf is instant.
+  // for PDF). Blob URLs die on reload, so the cache is in-memory per app run —
+  // never sessionStorage. LibraryScreen remounts (reader roundtrip) reuse it.
+  const coversMemory = useMemo(() => new Map<string, string>(), [])
   useEffect(() => {
     if (!libraryLoaded) return
     let cancelled = false
@@ -223,8 +225,7 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
       for (const book of books) {
         if (cancelled || extractedRef.current.has(book.hash)) continue
         extractedRef.current.add(book.hash)
-        const cacheKey = `deepread.cover.${book.hash}`
-        const cached = sessionStorage.getItem(cacheKey)
+        const cached = coversMemory.get(book.hash)
         if (cached) {
           setCovers((current) => new Map(current).set(book.hash, cached))
           continue
@@ -233,7 +234,7 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
         const cover = await extractCover(bookUrl, book.format as Parameters<typeof extractCover>[1])
         if (cancelled) return
         if (cover) {
-          sessionStorage.setItem(cacheKey, cover)
+          coversMemory.set(book.hash, cover)
           setCovers((current) => new Map(current).set(book.hash, cover))
         }
       }
@@ -241,7 +242,7 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
     return () => {
       cancelled = true
     }
-  }, [books, libraryLoaded])
+  }, [books, libraryLoaded, coversMemory])
 
   const importPaths = useCallback(async (paths: readonly string[]): Promise<void> => {
     for (const path of paths) {

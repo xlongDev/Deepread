@@ -27,6 +27,13 @@ pub fn run() {
             let base = app.path().app_data_dir()?;
             let conn = storage::open_db(&library::database_path(&base))?;
             storage::import_legacy(&conn, &base)?;
+            // Asset-protocol scope is in-memory only: re-allow every stored
+            // book on startup so covers and reading keep working after restart.
+            for book in library::list_books(&conn)? {
+                if let Err(err) = app.asset_protocol_scope().allow_file(&book.path) {
+                    log::warn!("failed to re-allow asset path {}: {err}", book.path);
+                }
+            }
             app.manage(storage::Db(std::sync::Mutex::new(conn)));
             Ok(())
         })
