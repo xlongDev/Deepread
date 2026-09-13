@@ -50,8 +50,8 @@ beforeEach(() => {
 describe('App library screen', () => {
   it('shows the import action, shelf books and backend info', async () => {
     render(<App />)
-    expect(screen.getByRole('button', { name: '导入书籍' })).toBeInTheDocument()
-    expect(await screen.findByText('夜航书.epub')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '导入书籍' })).toBeInTheDocument()
+    expect((await screen.findAllByText('夜航书')).length).toBeGreaterThan(0)
     expect(await screen.findByText(/Deepread 0\.2\.0/)).toBeInTheDocument()
     expect(invokeCommandMock).toHaveBeenCalledWith('library.list', undefined)
   })
