@@ -60,10 +60,18 @@ const PROVIDER_PRESETS: readonly {
   readonly baseUrl: string
   readonly model: string
 }[] = [
-  { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { label: 'Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
-  { label: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
-  { label: 'Ollama(本地)', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+  { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-pro' },
+  { label: 'Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-k3' },
+  { label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3' },
+  {
+    label: '通义 Qwen',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen3.8-max',
+  },
+  { label: 'MiniMax', baseUrl: 'https://api.minimaxi.com/v1', model: 'MiniMax-M3' },
+  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openrouter/auto' },
+  { label: 'Ollama(本地)', baseUrl: 'http://localhost:11434/v1', model: 'qwen3.8-flash' },
+  { label: 'LM Studio(本地)', baseUrl: 'http://localhost:1234/v1', model: 'local-model' },
 ]
 
 export function AiDrawer({
@@ -83,6 +91,7 @@ export function AiDrawer({
     name: '',
     baseUrl: '',
     model: '',
+    embeddingModel: '',
     apiKey: '',
   })
   const [messages, setMessages] = useState<readonly ChatUiMessage[]>([])
@@ -142,12 +151,14 @@ export function AiDrawer({
     const id =
       activeId ?? `cfg-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
     try {
+      const embeddingModel = configForm.embeddingModel.trim()
       const response = await invokeCommand('ai.config.save', {
         provider: {
           id,
           name: configForm.name.trim() || '自定义',
           baseUrl: configForm.baseUrl.trim(),
           model: configForm.model.trim(),
+          ...(embeddingModel ? { embeddingModel } : {}),
         },
         apiKey: configForm.apiKey.trim(),
       })
@@ -157,7 +168,7 @@ export function AiDrawer({
       ])
       setActiveId(response.provider.id)
       setShowConfig(false)
-      setConfigForm({ name: '', baseUrl: '', model: '', apiKey: '' })
+      setConfigForm({ name: '', baseUrl: '', model: '', embeddingModel: '', apiKey: '' })
       setError(null)
     } catch (saveError) {
       setError(toAppError(saveError).message)
@@ -665,267 +676,281 @@ export function AiDrawer({
         </div>
       </div>
 
-      {showConfig && (
-        <section className="ai-config" aria-label="服务配置">
-          {providers.map((provider) => (
-            <div key={provider.id} className="settings-row dictionary-row">
-              <span className="settings-label">
-                {provider.name} · {provider.model}
-              </span>
-              <button
-                type="button"
-                className="chrome-button"
-                onClick={() => void removeProvider(provider.id)}
-                title="移除"
-              >
-                <X size={12} weight="regular" aria-hidden />
-              </button>
-            </div>
-          ))}
-          <div className="segmented ai-presets">
-            {PROVIDER_PRESETS.map((preset) => (
-              <button key={preset.label} type="button" onClick={() => applyPreset(preset)}>
-                {preset.label}
-              </button>
-            ))}
-          </div>
-          <input
-            className="ai-input"
-            placeholder="名称"
-            value={configForm.name}
-            onChange={(event) => setConfigForm((form) => ({ ...form, name: event.target.value }))}
-          />
-          <input
-            className="ai-input"
-            placeholder="Base URL(OpenAI 兼容,含 /v1)"
-            value={configForm.baseUrl}
-            onChange={(event) =>
-              setConfigForm((form) => ({ ...form, baseUrl: event.target.value }))
-            }
-          />
-          <input
-            className="ai-input"
-            placeholder="模型名,如 deepseek-chat"
-            value={configForm.model}
-            onChange={(event) => setConfigForm((form) => ({ ...form, model: event.target.value }))}
-          />
-          <input
-            className="ai-input"
-            type="password"
-            placeholder="API Key(存入系统钥匙串)"
-            value={configForm.apiKey}
-            onChange={(event) => setConfigForm((form) => ({ ...form, apiKey: event.target.value }))}
-          />
-          <button
-            type="button"
-            className="reader-error-button"
-            onClick={() => void saveProvider()}
-            disabled={
-              configForm.baseUrl.trim().length === 0 || configForm.model.trim().length === 0
-            }
-          >
-            保存配置
-          </button>
-          <p className="ai-privacy">
-            密钥保存在本机钥匙串,不会进入页面或仓库;对话时仅发送下方勾选的正文片段。
-          </p>
-        </section>
-      )}
-
-      <div className="segmented ai-scope">
-        <button
-          type="button"
-          className={scope === 'selection' ? 'is-active' : ''}
-          onClick={() => setScope('selection')}
-          disabled={!selection}
-          title={selection ? '把选中文本作为上下文' : '先在正文中选一段文字'}
-        >
-          选中文本
-        </button>
-        <button
-          type="button"
-          className={scope === 'chapter' ? 'is-active' : ''}
-          onClick={() => setScope('chapter')}
-        >
-          当前章节
-        </button>
-        <button
-          type="button"
-          className={scope === 'book' ? 'is-active' : ''}
-          onClick={() => setScope('book')}
-        >
-          全书 RAG
-        </button>
-      </div>
-
-      {scope === 'book' && (
-        <div className="settings-row">
-          <span className="settings-label">
-            {indexStatus === 'ready'
-              ? '索引已就绪'
-              : indexStatus === 'building'
-                ? '正在建立索引…'
-                : indexStatus === 'missing'
-                  ? '尚无索引'
-                  : '索引状态未知'}
-          </span>
-          <div className="segmented">
-            <button
-              type="button"
-              onClick={() => void buildIndex()}
-              disabled={indexStatus === 'building'}
-            >
-              {indexStatus === 'building' ? '建立中' : '建立索引'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      <section className="ai-insights" aria-label="本书洞察">
-        <div className="settings-row">
-          <span className="settings-label">本书洞察(基于章节开头)</span>
-          <div className="segmented">
-            <button
-              type="button"
-              onClick={() => void generateInsight('summary')}
-              disabled={insightPhase === 'streaming'}
-            >
-              {insightPhase === 'streaming' && summary === null
-                ? '生成中…'
-                : summary === null
-                  ? '生成摘要'
-                  : '重新生成摘要'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void generateInsight('outline')}
-              disabled={insightPhase === 'streaming'}
-            >
-              {insightPhase === 'streaming' && outline === null
-                ? '生成中…'
-                : outline === null
-                  ? '生成大纲'
-                  : '重新生成大纲'}
-            </button>
-          </div>
-        </div>
-        {summary !== null && (
-          <div className="ai-insight">
-            <p className="ai-insight-overview">{summary.overview}</p>
-            <div className="ai-citations">
-              {summary.themes.map((theme) => (
-                <span key={theme} className="ai-citation">
-                  {theme}
+      <div className="ai-drawer-body">
+        {showConfig && (
+          <section className="ai-config" aria-label="服务配置">
+            {providers.map((provider) => (
+              <div key={provider.id} className="settings-row dictionary-row">
+                <span className="settings-label">
+                  {provider.name} · {provider.model}
                 </span>
+                <button
+                  type="button"
+                  className="chrome-button"
+                  onClick={() => void removeProvider(provider.id)}
+                  title="移除"
+                >
+                  <X size={12} weight="regular" aria-hidden />
+                </button>
+              </div>
+            ))}
+            <div className="segmented ai-presets">
+              {PROVIDER_PRESETS.map((preset) => (
+                <button key={preset.label} type="button" onClick={() => applyPreset(preset)}>
+                  {preset.label}
+                </button>
               ))}
             </div>
-            <p className="ai-privacy">{summary.coverage}</p>
-          </div>
-        )}
-        {characters !== null && (
-          <div className="ai-insight">
-            {characters.characters.map((character) => (
-              <p key={character.name} className="ai-insight-outline">
-                <strong>{character.name}</strong>
-                <span className="ai-citation">{character.role}</span> {character.description}
-              </p>
-            ))}
-          </div>
-        )}
-        <div className="segmented">
-          <button
-            type="button"
-            onClick={() => void generateCharacters()}
-            disabled={insightPhase === 'streaming'}
-          >
-            {characters === null ? '抽取角色' : '重新抽取角色'}
-          </button>
-        </div>
-        {sourceText !== null && (
-          <div className="settings-row">
-            <span className="settings-label">AI 纠错</span>
-            <div className="segmented">
-              <button
-                type="button"
-                onClick={() => void runAiRepair()}
-                disabled={insightPhase === 'streaming'}
-              >
-                {insightPhase === 'streaming' ? '检查中…' : 'AI 检查'}
-              </button>
-            </div>
-          </div>
-        )}
-        {aiCorrections !== null && (
-          <div className="ai-insight">
-            {aiCorrections.proposals.map((proposal) => (
-              <label
-                key={proposal.id}
-                className="repair-item"
-                aria-label={`应用纠错:${proposal.reason}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={aiCorrections.accepted.has(proposal.id)}
-                  onChange={() => toggleAiCorrection(proposal.id)}
-                />
-                <span className="repair-body">
-                  <span className="repair-rule">{proposal.reason}</span>
-                  <s className="repair-before">{proposal.find}</s>
-                  <span className="repair-after">{proposal.replace}</span>
-                </span>
-              </label>
-            ))}
+            <input
+              className="ai-input"
+              placeholder="名称"
+              value={configForm.name}
+              onChange={(event) => setConfigForm((form) => ({ ...form, name: event.target.value }))}
+            />
+            <input
+              className="ai-input"
+              placeholder="Base URL(OpenAI 兼容,含 /v1)"
+              value={configForm.baseUrl}
+              onChange={(event) =>
+                setConfigForm((form) => ({ ...form, baseUrl: event.target.value }))
+              }
+            />
+            <input
+              className="ai-input"
+              placeholder="对话模型,如 deepseek-v4-pro"
+              value={configForm.model}
+              onChange={(event) =>
+                setConfigForm((form) => ({ ...form, model: event.target.value }))
+              }
+            />
+            <input
+              className="ai-input"
+              placeholder="Embedding 模型(可选,默认用对话模型)"
+              value={configForm.embeddingModel}
+              onChange={(event) =>
+                setConfigForm((form) => ({ ...form, embeddingModel: event.target.value }))
+              }
+            />
+            <input
+              className="ai-input"
+              type="password"
+              placeholder="API Key(存入系统钥匙串)"
+              value={configForm.apiKey}
+              onChange={(event) =>
+                setConfigForm((form) => ({ ...form, apiKey: event.target.value }))
+              }
+            />
             <button
               type="button"
               className="reader-error-button"
-              onClick={() => void applyAiCorrectionsAccepted()}
+              onClick={() => void saveProvider()}
+              disabled={
+                configForm.baseUrl.trim().length === 0 || configForm.model.trim().length === 0
+              }
             >
-              应用已选({aiCorrections.accepted.size}/{aiCorrections.proposals.length})
+              保存配置
             </button>
+            <p className="ai-privacy">
+              密钥保存在本机钥匙串,不会进入页面或仓库;对话时仅发送下方勾选的正文片段。
+            </p>
+          </section>
+        )}
+
+        <div className="segmented ai-scope">
+          <button
+            type="button"
+            className={scope === 'selection' ? 'is-active' : ''}
+            onClick={() => setScope('selection')}
+            disabled={!selection}
+            title={selection ? '把选中文本作为上下文' : '先在正文中选一段文字'}
+          >
+            选中文本
+          </button>
+          <button
+            type="button"
+            className={scope === 'chapter' ? 'is-active' : ''}
+            onClick={() => setScope('chapter')}
+          >
+            当前章节
+          </button>
+          <button
+            type="button"
+            className={scope === 'book' ? 'is-active' : ''}
+            onClick={() => setScope('book')}
+          >
+            全书 RAG
+          </button>
+        </div>
+
+        {scope === 'book' && (
+          <div className="settings-row">
+            <span className="settings-label">
+              {indexStatus === 'ready'
+                ? '索引已就绪'
+                : indexStatus === 'building'
+                  ? '正在建立索引…'
+                  : indexStatus === 'missing'
+                    ? '尚无索引'
+                    : '索引状态未知'}
+            </span>
+            <div className="segmented">
+              <button
+                type="button"
+                onClick={() => void buildIndex()}
+                disabled={indexStatus === 'building'}
+              >
+                {indexStatus === 'building' ? '建立中' : '建立索引'}
+              </button>
+            </div>
           </div>
         )}
-      </section>
 
-      <div className="ai-messages">
-        {messages.length === 0 && (
-          <p className="lookup-empty">
-            {selection
-              ? `已带入选中文本(${selection.length} 字)。问点什么,比如“解释这段”。`
-              : '向 AI 提问关于当前书籍的问题。可在目录抽屉选中文字后回来提问。'}
-          </p>
-        )}
-        {messages.map((message, index) => (
-          <div key={index} className={`ai-msg-wrap ai-msg-wrap-${message.role}`}>
-            <div className={`ai-msg ai-msg-${message.role}`}>
-              {message.content || (message.streaming ? '…' : '')}
+        <section className="ai-insights" aria-label="本书洞察">
+          <div className="settings-row">
+            <span className="settings-label">本书洞察(基于章节开头)</span>
+            <div className="segmented">
+              <button
+                type="button"
+                onClick={() => void generateInsight('summary')}
+                disabled={insightPhase === 'streaming'}
+              >
+                {insightPhase === 'streaming' && summary === null
+                  ? '生成中…'
+                  : summary === null
+                    ? '生成摘要'
+                    : '重新生成摘要'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void generateInsight('outline')}
+                disabled={insightPhase === 'streaming'}
+              >
+                {insightPhase === 'streaming' && outline === null
+                  ? '生成中…'
+                  : outline === null
+                    ? '生成大纲'
+                    : '重新生成大纲'}
+              </button>
             </div>
-            {message.role === 'assistant' && citations.get(index) !== undefined && (
+          </div>
+          {summary !== null && (
+            <div className="ai-insight">
+              <p className="ai-insight-overview">{summary.overview}</p>
               <div className="ai-citations">
-                {citations.get(index)?.map((label) => (
-                  <span key={label} className="ai-citation">
-                    {label}
+                {summary.themes.map((theme) => (
+                  <span key={theme} className="ai-citation">
+                    {theme}
                   </span>
                 ))}
               </div>
-            )}
+              <p className="ai-privacy">{summary.coverage}</p>
+            </div>
+          )}
+          {characters !== null && (
+            <div className="ai-insight">
+              {characters.characters.map((character) => (
+                <p key={character.name} className="ai-insight-outline">
+                  <strong>{character.name}</strong>
+                  <span className="ai-citation">{character.role}</span> {character.description}
+                </p>
+              ))}
+            </div>
+          )}
+          <div className="segmented">
+            <button
+              type="button"
+              onClick={() => void generateCharacters()}
+              disabled={insightPhase === 'streaming'}
+            >
+              {characters === null ? '抽取角色' : '重新抽取角色'}
+            </button>
           </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
+          {sourceText !== null && (
+            <div className="settings-row">
+              <span className="settings-label">AI 纠错</span>
+              <div className="segmented">
+                <button
+                  type="button"
+                  onClick={() => void runAiRepair()}
+                  disabled={insightPhase === 'streaming'}
+                >
+                  {insightPhase === 'streaming' ? '检查中…' : 'AI 检查'}
+                </button>
+              </div>
+            </div>
+          )}
+          {aiCorrections !== null && (
+            <div className="ai-insight">
+              {aiCorrections.proposals.map((proposal) => (
+                <label
+                  key={proposal.id}
+                  className="repair-item"
+                  aria-label={`应用纠错:${proposal.reason}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={aiCorrections.accepted.has(proposal.id)}
+                    onChange={() => toggleAiCorrection(proposal.id)}
+                  />
+                  <span className="repair-body">
+                    <span className="repair-rule">{proposal.reason}</span>
+                    <s className="repair-before">{proposal.find}</s>
+                    <span className="repair-after">{proposal.replace}</span>
+                  </span>
+                </label>
+              ))}
+              <button
+                type="button"
+                className="reader-error-button"
+                onClick={() => void applyAiCorrectionsAccepted()}
+              >
+                应用已选({aiCorrections.accepted.size}/{aiCorrections.proposals.length})
+              </button>
+            </div>
+          )}
+        </section>
 
-      {error !== null && (
-        <p className="ai-error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {characters !== null && characters.characters.length > 0 && (
-        <div className="segmented">
-          <button type="button" onClick={() => setGraphOpen(true)}>
-            查看关系图
-          </button>
+        <div className="ai-messages">
+          {messages.length === 0 && (
+            <p className="lookup-empty">
+              {selection
+                ? `已带入选中文本(${selection.length} 字)。问点什么,比如“解释这段”。`
+                : '向 AI 提问关于当前书籍的问题。可在目录抽屉选中文字后回来提问。'}
+            </p>
+          )}
+          {messages.map((message, index) => (
+            <div key={index} className={`ai-msg-wrap ai-msg-wrap-${message.role}`}>
+              <div className={`ai-msg ai-msg-${message.role}`}>
+                {message.content || (message.streaming ? '…' : '')}
+              </div>
+              {message.role === 'assistant' && citations.get(index) !== undefined && (
+                <div className="ai-citations">
+                  {citations.get(index)?.map((label) => (
+                    <span key={label} className="ai-citation">
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
         </div>
-      )}
+
+        {error !== null && (
+          <p className="ai-error" role="alert">
+            {error}
+          </p>
+        )}
+
+        {characters !== null && characters.characters.length > 0 && (
+          <div className="segmented">
+            <button type="button" onClick={() => setGraphOpen(true)}>
+              查看关系图
+            </button>
+          </div>
+        )}
+      </div>
 
       <div className="ai-input-row">
         <input
