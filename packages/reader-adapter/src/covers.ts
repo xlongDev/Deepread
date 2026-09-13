@@ -55,8 +55,28 @@ export async function extractEpubCover(url: string): Promise<string | null> {
   const file = await fetchAsFile(url, 'book.epub', 'application/epub+zip')
   if (!file) return null
   try {
-    const book = await new EPUB(await makeZipLoader(file)).init()
-    return await kernelCover(book)
+    const loader = await makeZipLoader(file)
+    const book = await new EPUB(loader).init()
+    const cover = await kernelCover(book)
+    if (cover) return cover
+    // Fallback: some EPUBs declare the cover only by file name convention.
+    const imageEntry = loader.entries.find(
+      (entry) => /cover/i.test(entry.filename) && /\.(jpe?g|png|webp|gif)$/i.test(entry.filename),
+    )
+    if (!imageEntry) return null
+    const extension = (
+      /\.(jpe?g|png|webp|gif)$/i.exec(imageEntry.filename)?.[1] ?? 'jpeg'
+    ).toLowerCase()
+    const mime =
+      extension === 'png'
+        ? 'image/png'
+        : extension === 'webp'
+          ? 'image/webp'
+          : extension === 'gif'
+            ? 'image/gif'
+            : 'image/jpeg'
+    const blob = (await imageEntry.getData(new BlobWriter(mime))) as Blob | undefined
+    return blob && blob.size > 0 ? URL.createObjectURL(blob) : null
   } catch {
     return null
   }
@@ -83,7 +103,13 @@ export async function extractPdfCover(url: string): Promise<string | null> {
         import.meta.url,
       ).toString()
     }
-    const pdf = await pdfjs.getDocument({ url }).promise
+    const pdf = await pdfjs.getDocument({
+      url,
+      // Chinese PDFs need CMaps for text; served from the app bundle.
+      cMapUrl: '/pdfjs/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: '/pdfjs/standard_fonts/',
+    }).promise
     const page = await pdf.getPage(1)
     const baseViewport = page.getViewport({ scale: 1 })
     const scale = 480 / baseViewport.height

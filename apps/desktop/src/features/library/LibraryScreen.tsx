@@ -88,6 +88,11 @@ const viewFromStorage = (): ViewMode => {
   return stored === 'list' ? 'list' : 'grid'
 }
 
+// Module-level: survives LibraryScreen remounts (reader roundtrips) within
+// the app run. Blob URLs are per-run by nature, so no cross-restart cache.
+const coverCache = new Map<string, string>()
+const coverAttempted = new Set<string>()
+
 interface LibraryScreenProps {
   readonly onOpenBook: (book: OpenedBook) => void
   readonly backend: AppInfo | null
@@ -170,8 +175,6 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
   )
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupMsg, setBackupMsg] = useState<string | null>(null)
-  // Hashes already extracted (or attempted); keeps the extraction effect loop-free.
-  const extractedRef = useRef(new Set<string>())
 
   useEffect(() => {
     document.documentElement.dataset['appTheme'] = appTheme
@@ -215,26 +218,31 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
   }, [loadBooks])
 
   // Real cover extraction per book (kernel covers for EPUB/MOBI, PDF.js page 1
-  // for PDF). Blob URLs die on reload, so the cache is in-memory per app run —
-  // never sessionStorage. LibraryScreen remounts (reader roundtrip) reuse it.
-  const coversMemory = useMemo(() => new Map<string, string>(), [])
+  // for PDF), cached at module level so returning to the shelf never re-extracts.
   useEffect(() => {
     if (!libraryLoaded) return
+    // Sync already-cached covers immediately: remounts render without flicker.
+    const cachedNow = new Map<string, string>()
+    for (const book of books) {
+      const cached = coverCache.get(book.hash)
+      if (cached) cachedNow.set(book.hash, cached)
+    }
+    if (cachedNow.size > 0) setCovers((current) => new Map([...current, ...cachedNow]))
+
     let cancelled = false
     void (async () => {
       for (const book of books) {
-        if (cancelled || extractedRef.current.has(book.hash)) continue
-        extractedRef.current.add(book.hash)
-        const cached = coversMemory.get(book.hash)
-        if (cached) {
-          setCovers((current) => new Map(current).set(book.hash, cached))
+        if (cancelled || coverAttempted.has(book.hash)) continue
+        if (coverCache.has(book.hash)) {
+          setCovers((current) => new Map(current).set(book.hash, coverCache.get(book.hash)!))
           continue
         }
+        coverAttempted.add(book.hash)
         const bookUrl = isTauriRuntime() ? convertFileSrc(book.path) : book.path
         const cover = await extractCover(bookUrl, book.format as Parameters<typeof extractCover>[1])
         if (cancelled) return
         if (cover) {
-          coversMemory.set(book.hash, cover)
+          coverCache.set(book.hash, cover)
           setCovers((current) => new Map(current).set(book.hash, cover))
         }
       }
@@ -242,7 +250,7 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
     return () => {
       cancelled = true
     }
-  }, [books, libraryLoaded, coversMemory])
+  }, [books, libraryLoaded])
 
   const importPaths = useCallback(async (paths: readonly string[]): Promise<void> => {
     for (const path of paths) {
