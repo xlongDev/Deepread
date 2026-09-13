@@ -78,8 +78,15 @@ createServer((request, response) => {
             aliases: ['老人'],
             role: '主角',
             description: '每年点灯候信的人(基于片段)',
+            relationships: [{ with: '孩子们', type: '守护' }],
           },
-          { name: '孩子们', aliases: [], role: '路人', description: '数滴水的孩子们(基于片段)' },
+          {
+            name: '孩子们',
+            aliases: [],
+            role: '路人',
+            description: '数滴水的孩子们(基于片段)',
+            relationships: [],
+          },
         ],
       })
       response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`)

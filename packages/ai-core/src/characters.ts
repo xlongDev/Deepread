@@ -19,6 +19,16 @@ export const charactersSchema = z.object({
         aliases: z.array(z.string().min(1).max(60)).max(10),
         role: z.enum(['主角', '配角', '反派', '路人']),
         description: z.string().min(1).max(500),
+        /** Directed relations to other characters (by name). */
+        relationships: z
+          .array(
+            z.object({
+              with: z.string().min(1).max(60),
+              type: z.string().min(1).max(30),
+            }),
+          )
+          .max(20)
+          .default([]),
       }),
     )
     .max(50),

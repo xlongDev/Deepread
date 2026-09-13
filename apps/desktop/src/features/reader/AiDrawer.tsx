@@ -32,6 +32,7 @@ import {
   type CharactersPayload,
 } from '@deepread/ai-core'
 import { invokeCommand, invokeStreamingCommand, isTauriRuntime } from '../../lib/ipc'
+import { GraphView } from './GraphView'
 
 interface AiDrawerProps {
   /** Current selection text (if any) is offered as quick context. */
@@ -97,6 +98,7 @@ export function AiDrawer({
   const [outline, setOutline] = useState<OutlineInsight | null>(null)
   const [insightPhase, setInsightPhase] = useState<'idle' | 'streaming'>('idle')
   const [characters, setCharacters] = useState<CharactersPayload | null>(null)
+  const [graphOpen, setGraphOpen] = useState(false)
   const [aiCorrections, setAiCorrections] = useState<{
     proposals: readonly AiCorrection[]
     accepted: ReadonlySet<string>
@@ -917,6 +919,14 @@ export function AiDrawer({
         </p>
       )}
 
+      {characters !== null && characters.characters.length > 0 && (
+        <div className="segmented">
+          <button type="button" onClick={() => setGraphOpen(true)}>
+            查看关系图
+          </button>
+        </div>
+      )}
+
       <div className="ai-input-row">
         <input
           className="ai-input"
@@ -954,6 +964,9 @@ export function AiDrawer({
           </button>
         )}
       </div>
+      {graphOpen && characters !== null && (
+        <GraphView payload={characters} onClose={() => setGraphOpen(false)} />
+      )}
     </aside>
   )
 }

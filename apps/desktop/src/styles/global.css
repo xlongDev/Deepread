@@ -903,3 +903,51 @@ button {
   color: var(--color-text-primary);
   font-weight: var(--font-weight-medium);
 }
+
+/* ---------- Character graph overlay ---------- */
+
+.graph-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--color-bg);
+}
+
+.graph-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.graph-head strong {
+  font-weight: var(--font-weight-medium);
+}
+
+.graph-hint {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+}
+
+.graph-svg {
+  flex: 1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  cursor: grab;
+  touch-action: none;
+}
+
+.graph-svg:active {
+  cursor: grabbing;
+}
+
+.graph-dangling {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+}
