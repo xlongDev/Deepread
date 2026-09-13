@@ -7,6 +7,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, ErrorCode};
 
@@ -506,5 +507,225 @@ mod tests {
         std::fs::write(base.join("library.json"), "{broken").unwrap();
         let err = import_legacy(&conn, &base).expect_err("corrupt legacy must error");
         assert_eq!(err.code.as_str(), "STORAGE_CORRUPT");
+    }
+}
+
+// ---------- Backup / restore (spec §126) ----------
+
+use serde::{Deserialize, Serialize};
+
+pub fn file_checksum(path: &Path) -> Result<String, AppError> {
+    let mut file = std::fs::File::open(path).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to open file for checksum").with_cause(err)
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read file").with_cause(err)
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Consistent snapshot via VACUUM INTO (fails if the destination exists).
+pub fn backup_to(conn: &Connection, dest_path: &Path) -> Result<u64, AppError> {
+    if dest_path.exists() {
+        return Err(AppError::new(
+            ErrorCode::SystemValidation,
+            "目标文件已存在,请选择新的位置",
+        ));
+    }
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to create backup directory").with_cause(err)
+        })?;
+    }
+    let sql = format!(
+        "VACUUM INTO '{}'",
+        dest_path.to_string_lossy().replace('\\', "/")
+    );
+    conn.execute_batch(&sql).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to write backup").with_cause(err)
+    })?;
+    let size = std::fs::metadata(dest_path)
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "backup file missing").with_cause(err))?
+        .len();
+    Ok(size)
+}
+
+/// Pre-restore validation: checksum then integrity_check on the snapshot.
+pub fn validate_backup(path: &Path, checksum: &str) -> Result<(), AppError> {
+    let actual = file_checksum(path)?;
+    if actual != checksum {
+        return Err(
+            AppError::new(ErrorCode::StorageCorrupt, "校验和不匹配,备份文件可能已损坏")
+                .with_context("expected", Value::String(checksum.to_string()))
+                .with_context("actual", Value::String(actual)),
+        );
+    }
+    let source = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to open backup").with_cause(err)
+        })?;
+    let integrity: String = source
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageCorrupt, "integrity check failed").with_cause(err)
+        })?;
+    if integrity != "ok" {
+        return Err(AppError::new(
+            ErrorCode::StorageCorrupt,
+            format!("integrity check: {integrity}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Restore a validated snapshot INTO the live connection (rusqlite backup
+/// copies page-by-page), then run migrations in case the backup is older.
+pub fn restore_from(live: &mut Connection, path: &Path, checksum: &str) -> Result<bool, AppError> {
+    validate_backup(path, checksum)?;
+    let source = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to open backup").with_cause(err)
+        })?;
+    let backup = rusqlite::backup::Backup::new(&source, live).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to start restore").with_cause(err)
+    })?;
+    backup
+        .run_to_completion(5, std::time::Duration::from_millis(5), None)
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to restore").with_cause(err))?;
+    drop(backup);
+    drop(source);
+    migrate(live)?;
+    Ok(true)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageBackupRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageBackupResponse {
+    pub bytes: u64,
+    pub checksum: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageRestoreRequest {
+    pub path: String,
+    pub checksum: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRestoreResponse {
+    pub restored: bool,
+}
+
+#[tauri::command(rename = "storage.backup")]
+pub fn storage_backup(
+    db: tauri::State<'_, Db>,
+    request: StorageBackupRequest,
+) -> Result<StorageBackupResponse, AppError> {
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    let dest = Path::new(&request.path);
+    let bytes = backup_to(&conn, dest)?;
+    let checksum = file_checksum(dest)?;
+    Ok(StorageBackupResponse { bytes, checksum })
+}
+
+#[tauri::command(rename = "storage.restore")]
+pub fn storage_restore(
+    db: tauri::State<'_, Db>,
+    request: StorageRestoreRequest,
+) -> Result<StorageRestoreResponse, AppError> {
+    let mut conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    restore_from(&mut conn, Path::new(&request.path), &request.checksum)?;
+    Ok(StorageRestoreResponse { restored: true })
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "reader-backup-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_creates_snapshot_and_checksum_round_trips() {
+        let conn = memory_db();
+        conn.execute(
+            "INSERT INTO books (hash, file_name, format, path, size, added_at) VALUES ('h', 'n', 'epub', '/p', 1, 't')",
+            [],
+        )
+        .unwrap();
+        let base = temp_dir("round");
+        let dest = base.join("backup.db");
+
+        let bytes = backup_to(&conn, &dest).unwrap();
+        assert!(bytes > 0);
+        let checksum = file_checksum(&dest).unwrap();
+        assert_eq!(checksum.len(), 64);
+
+        // Corrupt the live DB, restore from snapshot, data returns.
+        conn.execute("DELETE FROM books", []).unwrap();
+        let mut live = conn;
+        restore_from(&mut live, &dest, &checksum).unwrap();
+        let count: i64 = live
+            .query_row("SELECT COUNT(*) FROM books", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn restore_rejects_checksum_mismatch() {
+        let conn = memory_db();
+        let base = temp_dir("mismatch");
+        let dest = base.join("backup.db");
+        backup_to(&conn, &dest).unwrap();
+        let mut live = conn;
+        let err = restore_from(&mut live, &dest, &"0".repeat(64))
+            .expect_err("checksum mismatch must fail");
+        assert_eq!(err.code.as_str(), "STORAGE_CORRUPT");
+    }
+
+    #[test]
+    fn backup_refuses_to_overwrite_existing_file() {
+        let conn = memory_db();
+        let base = temp_dir("exists");
+        let dest = base.join("backup.db");
+        backup_to(&conn, &dest).unwrap();
+        let err = backup_to(&conn, &dest).expect_err("must refuse overwrite");
+        assert_eq!(err.code.as_str(), "SYSTEM_VALIDATION");
     }
 }

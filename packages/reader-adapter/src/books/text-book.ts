@@ -11,6 +11,7 @@
 import type { FoliateBook, FoliateSection, FoliateTocItem } from 'foliate-js/view.js'
 
 import { byteLength } from './bytes'
+import { chapterTitleMatcher, isChapterTitle } from '@deepread/ai-core'
 
 const PARAGRAPHS_PER_SECTION = 400
 
@@ -19,12 +20,6 @@ const PARAGRAPHS_PER_SECTION = 400
  * with a chapter marker opens a new section. Content that merely contains
  * such a marker never splits — false positives stay inside their paragraph.
  */
-const CHAPTER_PATTERN =
-  /^\s*(?:(?:序章|楔子|终章|尾声|番外[一二三四五六七八九十]*)(?:[\s：:].{0,30})?|(?:第\s*[0-9零一二三四五六七八九十百千万两]+\s*[章卷回节部篇])(?:[\s：:.、]{0,3}[^\n]{0,30})?)\s*$/
-
-export function isChapterTitle(paragraph: string): boolean {
-  return paragraph.length <= 44 && CHAPTER_PATTERN.test(paragraph)
-}
 
 /** A paragraph that opens with a quotation mark reads as dialogue (ColorTxt). */
 export function isDialogue(paragraph: string): boolean {
@@ -92,7 +87,11 @@ export function chapterSections(text: string): { label: string; text: string }[]
   return sections.filter((section) => section.text.trim().length > 0)
 }
 
-export function buildTextBook(text: string, title: string): FoliateBook {
+export function buildTextBook(
+  text: string,
+  title: string,
+  options?: { chapterPattern?: string },
+): FoliateBook {
   const paragraphs = splitParagraphs(text)
 
   // Group into chapters at detected markers; content before the first marker
@@ -100,8 +99,9 @@ export function buildTextBook(text: string, title: string): FoliateBook {
   // the bounded chunk so huge flat files never create one giant iframe.
   type Block = { text: string; chapter: boolean; dialogue: boolean }
   const sections: { blocks: Block[]; chapterTitle?: string }[] = [{ blocks: [] }]
+  const isTitle = chapterTitleMatcher(options?.chapterPattern)
   for (const paragraph of paragraphs) {
-    if (isChapterTitle(paragraph)) {
+    if (isTitle(paragraph)) {
       sections.push({
         blocks: [{ text: paragraph, chapter: true, dialogue: false }],
         chapterTitle: paragraph,
@@ -156,3 +156,5 @@ export function buildTextBook(text: string, title: string): FoliateBook {
     },
   }
 }
+
+export { isChapterTitle, chapterTitleMatcher } from '@deepread/ai-core'

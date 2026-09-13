@@ -40,6 +40,44 @@ function splitLongParagraph(paragraph: string): string[] {
   return pieces
 }
 
+/** Built-in chapter rule (spec §15): also mirrored by the TXT adapter. */
+export const BUILT_IN_CHAPTER_PATTERN =
+  /^\s*(?:(?:序章|楔子|终章|尾声|番外[一二三四五六七八九十]*)(?:[\s：:].{0,30})?|(?:第\s*[0-9零一二三四五六七八九十百千万两]+\s*[章卷回节部篇])(?:[\s：:.、]{0,3}[^\n]{0,30})?)\s*$/
+
+/** Built-in chapter-title test: short paragraph matching the built-in rule. */
+export function isChapterTitle(paragraph: string): boolean {
+  return paragraph.length <= 44 && BUILT_IN_CHAPTER_PATTERN.test(paragraph)
+}
+
+/** Build a chapter-title matcher from an optional custom regex pattern. */
+export function chapterTitleMatcher(pattern?: string): (paragraph: string) => boolean {
+  if (!pattern) return isChapterTitle
+  const regex = new RegExp(pattern) // throws on invalid input — caller surfaces
+  return (paragraph) => paragraph.length <= 60 && regex.test(paragraph)
+}
+
+/** Split source text into chapter-labeled sections using a chapter matcher. */
+export function chapterSectionsWith(
+  text: string,
+  isTitle: (paragraph: string) => boolean,
+): { label: string; text: string }[] {
+  const paragraphs = text.split(/\r?\n\r?\n|\r?\n/)
+  const sections: { label: string; text: string }[] = []
+  for (const paragraph of paragraphs) {
+    const trimmed = paragraph.trim()
+    if (!trimmed) continue
+    if (isTitle(trimmed) && trimmed.length <= 60) {
+      sections.push({ label: trimmed, text: trimmed })
+    } else if (sections.length > 0) {
+      const current = sections[sections.length - 1]
+      if (current) current.text = `${current.text}\n\n${trimmed}`
+    } else {
+      sections.push({ label: '开篇', text: trimmed })
+    }
+  }
+  return sections.filter((section) => section.text.trim().length > 0)
+}
+
 /** Split one section's text into overlapping windows on paragraph bounds. */
 export function chunkSectionText(text: string): string[] {
   const trimmed = text.trim()

@@ -96,6 +96,7 @@ export class FoliateAdapter implements ReaderEngine {
   #tapTimer: ReturnType<typeof setTimeout> | undefined
   #destroyed = false
   #adapterBuiltText: { format: 'txt' | 'md'; title: string; text: string } | null = null
+  #chapterPattern: string | undefined
 
   constructor(host: HTMLElement, callbacks: EngineCallbacks = {}) {
     this.#host = host
@@ -225,7 +226,11 @@ export class FoliateAdapter implements ReaderEngine {
         case 'txt': {
           const text = decodeText(await file.arrayBuffer())
           this.#adapterBuiltText = { format: 'txt', title: titleFromName(file.name), text }
-          await this.#requireView().open(buildTextBook(text, titleFromName(file.name)))
+          await this.#requireView().open(
+            buildTextBook(text, titleFromName(file.name), {
+              chapterPattern: this.#chapterPattern,
+            }),
+          )
           break
         }
         case 'md': {
@@ -279,6 +284,35 @@ export class FoliateAdapter implements ReaderEngine {
     this.#adapterBuiltText = { ...built, text }
     this.#applyStyles()
     await view.goTo('s0')
+  }
+
+  /**
+   * Chapter reconstruction (spec §15): rebuild a TXT book's sections with a
+   * user-supplied chapter-title regex. Pass null to return to the built-in
+   * rule. Returns the resulting section count.
+   */
+  async rebuildChapters(pattern: string | null): Promise<number> {
+    const built = this.#adapterBuiltText
+    if (!built || built.format !== 'txt') {
+      throw new AppError(ErrorCodes.systemValidation, '章节重建目前仅支持 TXT 书籍。')
+    }
+    if (pattern !== null && pattern.trim() !== '') {
+      try {
+        new RegExp(pattern) // eslint-disable-line no-new -- validation only
+      } catch {
+        throw new AppError(ErrorCodes.systemValidation, `无效的正则表达式:${pattern}`)
+      }
+    }
+    this.#chapterPattern = pattern === null ? undefined : pattern.trim()
+    const view = this.#requireView()
+    await view.open(
+      buildTextBook(built.text, built.title, {
+        chapterPattern: this.#chapterPattern,
+      }),
+    )
+    this.#applyStyles()
+    await view.goTo('s0')
+    return view.book.sections.length
   }
 
   async close(): Promise<void> {

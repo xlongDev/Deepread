@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@deepread/ai-core": "workspace:*",
     "@deepread/reader-core": "workspace:*",
     "@deepread/shared": "workspace:*",
     "foliate-js": "1.0.1",

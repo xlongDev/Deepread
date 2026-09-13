@@ -62,6 +62,8 @@ pub fn run() {
             ai::ai_index_set,
             ai::ai_artifact_get,
             ai::ai_artifact_set,
+            storage::storage_backup,
+            storage::storage_restore,
             secrets::secret_set,
             secrets::secret_get,
             secrets::secret_delete,

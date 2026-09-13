@@ -8,7 +8,7 @@ import {
   SquaresFour,
   X,
 } from '@phosphor-icons/react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { toAppError, type AppInfo, type LibraryBook } from '@deepread/shared'
 import { extractCover } from '@deepread/reader-adapter'
@@ -168,6 +168,8 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
   const [appTheme, setAppTheme] = useState<AppTheme>(
     () => (localStorage.getItem('deepread.app-theme') as AppTheme | null) ?? 'pure-white',
   )
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupMsg, setBackupMsg] = useState<string | null>(null)
   // Hashes already extracted (or attempted); keeps the extraction effect loop-free.
   const extractedRef = useRef(new Set<string>())
 
@@ -176,33 +178,41 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
     localStorage.setItem('deepread.app-theme', appTheme)
   }, [appTheme])
 
+  const loadBooks = useCallback(async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      setLibraryLoaded(true)
+      return
+    }
+    try {
+      const response = await invokeCommand('library.list', undefined)
+      const withProgress = await Promise.all(
+        response.books.map(async (book) => {
+          try {
+            const state = await invokeCommand('reader.state.get', { bookHash: book.hash })
+            return { ...book, progress: state.state?.progress?.fraction ?? null }
+          } catch {
+            return { ...book, progress: null }
+          }
+        }),
+      )
+      setBooks(withProgress)
+    } catch {
+      // The library still works: importing will retry the list.
+    } finally {
+      setLibraryLoaded(true)
+    }
+  }, [])
+
   useEffect(() => {
-    if (!isTauriRuntime()) return
     let cancelled = false
     void (async () => {
-      try {
-        const response = await invokeCommand('library.list', undefined)
-        const withProgress = await Promise.all(
-          response.books.map(async (book) => {
-            try {
-              const state = await invokeCommand('reader.state.get', { bookHash: book.hash })
-              return { ...book, progress: state.state?.progress?.fraction ?? null }
-            } catch {
-              return { ...book, progress: null }
-            }
-          }),
-        )
-        if (!cancelled) setBooks(withProgress)
-      } catch {
-        // The library still works: importing will retry the list.
-      } finally {
-        if (!cancelled) setLibraryLoaded(true)
-      }
+      await loadBooks()
+      if (cancelled) return
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [loadBooks])
 
   // Real cover extraction per book (kernel covers for EPUB/MOBI, PDF.js page 1
   // for PDF); results cached in sessionStorage so reopening the shelf is instant.
@@ -317,6 +327,56 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
       setBooks((current) => current.filter((b) => b.hash !== hash))
     } catch (error) {
       setProblem(toAppError(error).message ?? null)
+    }
+  }, [])
+
+  const runBackup = useCallback(async (): Promise<void> => {
+    const path = await save({
+      defaultPath: `deepread-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      filters: [{ name: 'SQLite 备份', extensions: ['db'] }],
+    })
+    if (!path) return
+    setBackupBusy(true)
+    try {
+      const response = await invokeCommand('storage.backup', { path })
+      setBackupMsg(
+        `已备份 ${formatBytes(response.bytes)} · 校验和 ${response.checksum.slice(0, 12)}…`,
+      )
+    } catch (backupError) {
+      setBackupMsg(toAppError(backupError).message)
+    } finally {
+      setBackupBusy(false)
+    }
+  }, [])
+
+  const runRestore = useCallback(async (reload: () => void): Promise<void> => {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'SQLite 备份', extensions: ['db'] }],
+    })
+    if (!selected || typeof selected !== 'string') return
+    const checksumPath = `${selected}.sha256`
+    let checksum = ''
+    try {
+      const response = await fetch(convertFileSrc(checksumPath))
+      if (response.ok) checksum = (await response.text()).trim()
+    } catch {
+      // checksum file optional; Rust validates integrity regardless
+    }
+    if (!checksum) {
+      setBackupMsg('未找到校验和文件(.sha256),无法确认备份完整性。')
+      return
+    }
+    setBackupBusy(true)
+    try {
+      await invokeCommand('storage.restore', { path: selected, checksum })
+      setBackupMsg('恢复完成:书架、进度与批注已还原。')
+      reload()
+    } catch (restoreError) {
+      setBackupMsg(toAppError(restoreError).message)
+    } finally {
+      setBackupBusy(false)
     }
   }, [])
 
@@ -691,6 +751,20 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
                 </button>
               ))}
             </div>
+            <p className="settings-section-label">备份与恢复</p>
+            <div className="segmented">
+              <button type="button" onClick={() => void runBackup()} disabled={backupBusy}>
+                {backupBusy ? '备份中…' : '备份到…'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runRestore(loadBooks)}
+                disabled={backupBusy}
+              >
+                {backupBusy ? '恢复中…' : '从备份恢复…'}
+              </button>
+            </div>
+            {backupMsg !== null && <p className="library-note">{backupMsg}</p>}
             <p className="settings-section-label">书架偏好(自动保存)</p>
             <p className="ai-privacy">
               排序与视图选择自动记忆;AI 服务在阅读器内的 ✦ 助手里配置(密钥存入系统钥匙串)。

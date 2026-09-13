@@ -32,6 +32,8 @@ export const COMMAND = {
   aiIndexSet: 'ai.index.set',
   aiArtifactGet: 'ai.artifact.get',
   aiArtifactSet: 'ai.artifact.set',
+  storageBackup: 'storage.backup',
+  storageRestore: 'storage.restore',
   secretSet: 'secret.set',
   secretGet: 'secret.get',
   secretDelete: 'secret.delete',
@@ -265,6 +267,26 @@ export interface AiArtifactSetResponse {
   readonly savedAt: ISO8601
 }
 
+/** Backup the SQLite database to a user-chosen file (spec §126). */
+export interface StorageBackupRequest {
+  readonly path: string
+}
+
+export interface StorageBackupResponse {
+  readonly bytes: number
+  readonly checksum: string
+}
+
+/** Restore from a validated snapshot; migrations re-run if the backup is older. */
+export interface StorageRestoreRequest {
+  readonly path: string
+  readonly checksum: string
+}
+
+export interface StorageRestoreResponse {
+  readonly restored: boolean
+}
+
 export interface SecretSetRequest {
   readonly key: string
   readonly value: string
@@ -381,6 +403,14 @@ export interface CommandMap {
   [COMMAND.aiArtifactGet]: {
     readonly request: AiArtifactGetRequest
     readonly response: AiArtifactGetResponse
+  }
+  [COMMAND.storageBackup]: {
+    readonly request: StorageBackupRequest
+    readonly response: StorageBackupResponse
+  }
+  [COMMAND.storageRestore]: {
+    readonly request: StorageRestoreRequest
+    readonly response: StorageRestoreResponse
   }
   [COMMAND.aiArtifactSet]: {
     readonly request: AiArtifactSetRequest
@@ -558,6 +588,18 @@ export const aiArtifactGetRequestSchema = z.object({
   bookHash,
   kind: artifactKindSchema,
 })
+export const storageBackupRequestSchema = z.object({
+  path: z.string().min(1).max(4096),
+})
+export const storageBackupResponseSchema = z.object({
+  bytes: z.number().int().min(0),
+  checksum: z.string().length(64),
+})
+export const storageRestoreRequestSchema = z.object({
+  path: z.string().min(1).max(4096),
+  checksum: z.string().length(64),
+})
+export const storageRestoreResponseSchema = z.object({ restored: z.boolean() })
 export const aiArtifactGetResponseSchema = z.object({
   payload: z.record(z.string(), z.unknown()).nullable(),
   createdAt: iso8601.nullable(),
@@ -606,6 +648,8 @@ export const responseValidators: {
   [COMMAND.aiIndexSet]: aiIndexSetResponseSchema,
   [COMMAND.aiArtifactGet]: aiArtifactGetResponseSchema,
   [COMMAND.aiArtifactSet]: aiArtifactSetResponseSchema,
+  [COMMAND.storageBackup]: storageBackupResponseSchema,
+  [COMMAND.storageRestore]: storageRestoreResponseSchema,
   [COMMAND.secretSet]: secretDeleteResponseSchema,
   [COMMAND.secretGet]: secretGetResponseSchema,
   [COMMAND.secretDelete]: secretDeleteResponseSchema,
@@ -628,6 +672,8 @@ export const requestValidators: { [K in CommandName]: ResponseValidator<unknown>
   [COMMAND.aiIndexGet]: aiIndexGetRequestSchema,
   [COMMAND.aiIndexSet]: aiIndexSetRequestSchema,
   [COMMAND.aiArtifactGet]: aiArtifactGetRequestSchema,
+  [COMMAND.storageBackup]: storageBackupRequestSchema,
+  [COMMAND.storageRestore]: storageRestoreRequestSchema,
   [COMMAND.aiArtifactSet]: aiArtifactSetRequestSchema,
   [COMMAND.aiConfigSave]: aiConfigSaveRequestSchema,
   [COMMAND.aiConfigRemove]: aiConfigRemoveRequestSchema,

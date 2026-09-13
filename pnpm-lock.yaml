@@ -127,6 +127,9 @@ importers:
 
   packages/reader-adapter:
     dependencies:
+      '@deepread/ai-core':
+        specifier: workspace:*
+        version: link:../ai-core
       '@deepread/reader-core':
         specifier: workspace:*
         version: link:../reader-core

@@ -168,6 +168,10 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     accepted: ReadonlySet<string>
   } | null>(null)
   const [aiOpen, setAiOpen] = useState(false)
+  const [rebuildOpen, setRebuildOpen] = useState(false)
+  const [rebuildPattern, setRebuildPattern] = useState(
+    () => localStorage.getItem(`deepread.chapterPattern.${book.hash}`) ?? '',
+  )
   const [panelProblem, setPanelProblem] = useState<string | null>(null)
   const dictCacheRef = useRef(
     new Map<string, { entries: ReturnType<typeof buildIndex>; dict: Uint8Array }>(),
@@ -557,6 +561,22 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
     })
   }
 
+  const applyRebuild = async (): Promise<void> => {
+    const adapter = adapterRef.current
+    if (!adapter) return
+    try {
+      const count = await adapter.rebuildChapters(
+        rebuildPattern.trim() === '' ? null : rebuildPattern.trim(),
+      )
+      localStorage.setItem(`deepread.chapterPattern.${book.hash}`, rebuildPattern.trim())
+      setToc(await adapter.getTableOfContents())
+      setRebuildOpen(false)
+      setError(`章节重建完成:共 ${count} 节。`)
+    } catch (rebuildError) {
+      setError(toAppError(rebuildError).message)
+    }
+  }
+
   const runLookup = async (): Promise<void> => {
     if (!selection) return
     const word = selection.text
@@ -869,14 +889,44 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           ))}
 
           {book.format === 'txt' && (
-            <div className="settings-row repair-row">
-              <span className="settings-label">文本修整</span>
-              <div className="segmented">
-                <button type="button" onClick={startRepair}>
-                  检查
-                </button>
+            <>
+              <div className="settings-row repair-row">
+                <span className="settings-label">文本修整</span>
+                <div className="segmented">
+                  <button type="button" onClick={startRepair}>
+                    检查
+                  </button>
+                </div>
               </div>
-            </div>
+              <div className="settings-row repair-row">
+                <span className="settings-label">章节重建</span>
+                <div className="segmented">
+                  <button type="button" onClick={() => setRebuildOpen((open) => !open)}>
+                    {rebuildOpen ? '收起' : '自定义'}
+                  </button>
+                </div>
+              </div>
+              {rebuildOpen && (
+                <div className="rebuild-form">
+                  <input
+                    className="ai-input"
+                    placeholder="正则,如 第\s*\d+\s*章(留空用内置规则)"
+                    value={rebuildPattern}
+                    onChange={(event) => setRebuildPattern(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void applyRebuild()
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="reader-error-button"
+                    onClick={() => void applyRebuild()}
+                  >
+                    重建
+                  </button>
+                </div>
+              )}
+            </>
           )}
 
           {bookmarks.length > 0 && <p className="reader-section-label">书签</p>}
