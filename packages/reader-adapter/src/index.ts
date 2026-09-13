@@ -2,6 +2,7 @@
 /// <reference path="./vite-env.d.ts" />
 
 export * from './engine'
+export * from './covers'
 export * from './enhance/text-repair'
 export * from './format'
 export { buildMobiBook } from './books/mobi-book'

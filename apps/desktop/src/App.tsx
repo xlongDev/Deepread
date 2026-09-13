@@ -9,11 +9,6 @@ export function App() {
   const [backend, setBackend] = useState<AppInfo | null>(null)
   const [book, setBook] = useState<OpenedBook | null>(null)
 
-  // The library reads on a stable light surface; the reader owns its themes.
-  useEffect(() => {
-    document.documentElement.dataset['theme'] = 'light'
-  }, [])
-
   useEffect(() => {
     let cancelled = false
     invokeCommand('app.info', undefined)

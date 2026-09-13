@@ -151,3 +151,39 @@ declare module 'foliate-js/fb2.js' {
 declare module 'foliate-js/vendor/fflate.js' {
   export function unzlibSync(data: Uint8Array): Uint8Array
 }
+
+declare module 'foliate-js/epub.js' {
+  import type { FoliateBook } from 'foliate-js/view.js'
+
+  export class EPUB {
+    constructor(loader: unknown)
+    init(): Promise<FoliateBook>
+  }
+}
+
+declare module 'foliate-js/vendor/zip.js' {
+  export function configure(options: { useWebWorkers: boolean }): void
+
+  export interface ZipEntry {
+    filename: string
+    uncompressedSize: number
+    getData<T>(writer: T): Promise<unknown> | undefined
+  }
+
+  export class ZipReader {
+    constructor(reader: unknown)
+    getEntries(): Promise<ZipEntry[]>
+  }
+
+  export class BlobReader {
+    constructor(blob: Blob)
+  }
+
+  export class BlobWriter {
+    constructor(type?: string)
+  }
+
+  export class TextWriter {
+    constructor(encoding?: string)
+  }
+}
