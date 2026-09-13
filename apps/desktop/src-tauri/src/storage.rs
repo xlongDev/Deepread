@@ -200,6 +200,18 @@ fn import_library(conn: &Connection, base: &Path) -> Result<(), AppError> {
 }
 
 fn import_one_reader_state(conn: &Connection, hash: &str, value: &Value) -> Result<(), AppError> {
+    // Reader states may reference books whose file was imported in a previous
+    // install (library.json empty after a data-dir move). Seed a placeholder
+    // book row so the foreign key holds; re-importing the same file later
+    // replaces the placeholder with real metadata (same content hash).
+    conn.execute(
+        "INSERT OR IGNORE INTO books (hash, file_name, format, path, size, added_at)
+         VALUES (?1, ?1, 'unknown', '', 0, ?2)",
+        rusqlite::params![hash, crate::timestamps::rfc3339_now()],
+    )
+    .map_err(|err| {
+        AppError::new(ErrorCode::StorageCorrupt, "placeholder book failed").with_cause(err)
+    })?;
     if let Some(progress) = value.get("progress") {
         conn.execute(
             "INSERT OR REPLACE INTO progress (book_hash, cfi, fraction, updated_at) VALUES (?1, ?2, ?3, ?4)",
@@ -490,6 +502,44 @@ mod tests {
         assert_eq!(count, 1);
         assert!(!base.join("library.json").exists());
         assert!(base.join("library.json.imported").exists());
+    }
+
+    #[test]
+    fn reader_state_import_seeds_placeholder_book_for_missing_hash() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "reader-legacy-state-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hash = "13d9bcd5b62d7ca949743f5ce18ef6c6845e273534556eb5fa70630a1808e457";
+        let dir = base.join("reader-state");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{hash}.json")),
+            r#"{"progress":{"cfi":"x","fraction":0.84},"annotations":[],"bookmarks":[],"updatedAt":"2026-09-13T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        import_legacy(&conn, &base).unwrap();
+
+        let book_hash: String = conn
+            .query_row("SELECT hash FROM books WHERE hash = ?1", [hash], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(book_hash, hash);
+        let progress: f64 = conn
+            .query_row(
+                "SELECT fraction FROM progress WHERE book_hash = ?1",
+                [hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((progress - 0.84).abs() < 1e-9);
     }
 
     #[test]

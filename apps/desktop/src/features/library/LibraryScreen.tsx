@@ -443,7 +443,7 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
       </header>
 
       <main className="library-main">
-        {libraryLoaded && books.length === 0 && (
+        {libraryLoaded && books.length === 0 && !isTauriRuntime() && (
           <section className="library-empty" aria-label="导入书籍">
             <button
               type="button"
@@ -457,11 +457,9 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
                 EPUB、MOBI、AZW3、FB2、CBZ、PDF、TXT、Markdown
               </span>
             </button>
-            {!isTauriRuntime() && (
-              <p className="library-note">
-                浏览器模式:导入的书籍只在当前会话有效;下载桌面版获得书架与进度记忆。
-              </p>
-            )}
+            <p className="library-note">
+              浏览器模式:导入的书籍只在当前会话有效;下载桌面版获得书架与进度记忆。
+            </p>
           </section>
         )}
 
@@ -587,10 +585,20 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
                                 background: `linear-gradient(160deg, ${palette[0]}, ${palette[1]})`,
                               }
                         }
-                        onClick={() => onOpenBook(openedBookFromLibrary(book))}
-                        title={`打开《${title}》`}
+                        onClick={
+                          book.format === 'unknown'
+                            ? undefined
+                            : () => onOpenBook(openedBookFromLibrary(book))
+                        }
+                        title={
+                          book.format === 'unknown'
+                            ? '重新导入同一文件即可恢复此书的进度与批注'
+                            : `打开《${title}》`
+                        }
                       >
-                        {coverUrl ? (
+                        {book.format === 'unknown' ? (
+                          <span className="book-cover-missing">待重新导入</span>
+                        ) : coverUrl ? (
                           <img src={coverUrl} alt="" className="book-cover-img" loading="lazy" />
                         ) : (
                           <>
@@ -598,7 +606,9 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
                             <span className="book-cover-title">{title}</span>
                           </>
                         )}
-                        <span className="book-format">{book.format.toUpperCase()}</span>
+                        {book.format !== 'unknown' && (
+                          <span className="book-format">{book.format.toUpperCase()}</span>
+                        )}
                         {progress !== null && progress > 0 && (
                           <span className="book-progress" aria-hidden>
                             <span
@@ -613,9 +623,11 @@ export function LibraryScreen({ onOpenBook, backend }: LibraryScreenProps) {
                           {title}
                         </span>
                         <span className="book-meta-sub">
-                          {progress !== null && progress > 0
-                            ? `读到 ${Math.round(progress * 100)}% · ${formatBytes(book.size)}`
-                            : formatBytes(book.size)}
+                          {book.format === 'unknown'
+                            ? '重新导入同一文件即可恢复'
+                            : progress !== null && progress > 0
+                              ? `读到 ${Math.round(progress * 100)}% · ${formatBytes(book.size)}`
+                              : formatBytes(book.size)}
                         </span>
                       </div>
                       <button

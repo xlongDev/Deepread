@@ -1476,3 +1476,9 @@ button {
   gap: var(--space-xs);
   width: 100%;
 }
+
+.book-cover-missing {
+  font-size: var(--font-size-sm);
+  color: rgba(29, 27, 23, 0.55);
+  text-align: center;
+}
