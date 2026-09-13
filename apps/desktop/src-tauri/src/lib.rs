@@ -24,6 +24,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::Manager;
+            // NOTE: Builder::setup REPLACES any previous closure — keep every
+            // startup step inside this single closure.
             let base = app.path().app_data_dir()?;
             let conn = storage::open_db(&library::database_path(&base))?;
             storage::import_legacy(&conn, &base)?;
@@ -35,6 +37,16 @@ pub fn run() {
                 }
             }
             app.manage(storage::Db(std::sync::Mutex::new(conn)));
+
+            let payload = events::AppReadyPayload {
+                started_at: timestamps::rfc3339_now(),
+                app_version: app.package_info().version.to_string(),
+            };
+            let transport_name = events::transport_name(events::EVENT_APP_READY);
+            if let Err(err) = app.handle().emit(&transport_name, payload) {
+                warn!("failed to emit {} event: {err}", events::EVENT_APP_READY);
+            }
+            info!("Deepread backend started");
             Ok(())
         })
         .manage(ai::AiState::default())
@@ -75,18 +87,6 @@ pub fn run() {
             secrets::secret_get,
             secrets::secret_delete,
         ])
-        .setup(|app| {
-            let payload = events::AppReadyPayload {
-                started_at: timestamps::rfc3339_now(),
-                app_version: app.package_info().version.to_string(),
-            };
-            let transport_name = events::transport_name(events::EVENT_APP_READY);
-            if let Err(err) = app.handle().emit(&transport_name, payload) {
-                warn!("failed to emit {} event: {err}", events::EVENT_APP_READY);
-            }
-            info!("Deepread backend started");
-            Ok(())
-        })
         .run(tauri::generate_context!())
         .expect("error while running Deepread");
 }

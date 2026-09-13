@@ -319,6 +319,24 @@ mod tests {
     }
 
     #[test]
+    fn imports_files_with_chinese_names() {
+        let conn = memory_db();
+        let base = std::env::temp_dir().join(format!(
+            "reader-lib-cn-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("深入理解 AI Agent: 设计原理与工程实践.epub");
+        std::fs::write(&path, b"epub-bytes").unwrap();
+        let book = import_book(&conn, path.to_str().unwrap()).unwrap();
+        assert_eq!(book.format, "epub");
+        assert!(book.path.contains("深入理解"));
+    }
+
+    #[test]
     fn import_rejects_unsupported_formats_before_touching_storage() {
         let conn = memory_db();
         let base = std::env::temp_dir().join(format!(

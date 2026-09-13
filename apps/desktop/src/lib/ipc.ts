@@ -49,6 +49,11 @@ function normalizeIpcError(error: unknown): AppError {
       context: jsonRecordFromUnknown(payload.context),
     })
   }
+  // Tauri surfaces internal failures (bad args, unmanaged state, panics) as
+  // plain strings — show them verbatim instead of a generic fallback.
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return new AppError(ErrorCodes.systemIpcFailed, error, { retryable: false })
+  }
   return toAppError(error, ErrorCodes.systemIpcFailed)
 }
 
