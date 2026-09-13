@@ -1,12 +1,13 @@
-//! StarDict dictionaries: registered by picking the `.ifo` file; the sibling
-//! `.idx` / `.dict(.dz)` files are located and allowed on the asset protocol.
-//! Files stay at their original location; parsing happens in the frontend
-//! (see `packages/reader-adapter/src/dictionary/stardict.ts`).
+//! StarDict dictionaries registered in SQLite. Files stay at their original
+//! location; parsing happens in the frontend (see
+//! `packages/reader-adapter/src/dictionary/stardict.ts`).
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
 use tauri::Manager;
 
 use crate::error::{AppError, ErrorCode};
@@ -22,13 +23,6 @@ pub struct DictionaryMeta {
     pub ifo_path: String,
     pub idx_path: String,
     pub dict_path: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DictionaryStore {
-    #[serde(default)]
-    dictionaries: Vec<DictionaryMeta>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,41 +55,8 @@ pub struct DictionaryRemoveResponse {
     pub removed: bool,
 }
 
-fn dictionary_store_path(base: &Path) -> PathBuf {
-    base.join("dictionaries.json")
-}
-
-fn load_store(base: &Path) -> Result<DictionaryStore, AppError> {
-    let bytes = match std::fs::read(dictionary_store_path(base)) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DictionaryStore::default());
-        }
-        Err(err) => {
-            return Err(
-                AppError::new(ErrorCode::StorageIo, "failed to read dictionaries").with_cause(err),
-            );
-        }
-    };
-    serde_json::from_slice(&bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageCorrupt, "dictionary store is corrupted").with_cause(err)
-    })
-}
-
-fn save_store(base: &Path, store: &DictionaryStore) -> Result<(), AppError> {
-    std::fs::create_dir_all(base).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to create data directory").with_cause(err)
-    })?;
-    let bytes = serde_json::to_vec_pretty(store).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to serialize dictionaries").with_cause(err)
-    })?;
-    std::fs::write(dictionary_store_path(base), bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to write dictionaries").with_cause(err)
-    })
-}
-
 /// Minimal `.ifo` parse: `key=value` lines; we need bookname, wordcount and
-/// sametypesequence. Everything else is the frontend's concern.
+/// sametypesequence.
 pub fn parse_ifo(text: &str) -> Result<(String, u64, Option<String>), AppError> {
     let mut bookname: Option<String> = None;
     let mut wordcount: Option<u64> = None;
@@ -133,10 +94,47 @@ fn sibling_with_extension(ifo_path: &Path, extension: &str) -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Register flow shared by the command: validate the `.ifo`, require the
-/// sibling `.idx` and `.dict(.dz)`, allow all three on the asset protocol.
+fn row_to_dictionary(row: &rusqlite::Row<'_>) -> rusqlite::Result<DictionaryMeta> {
+    Ok(DictionaryMeta {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        word_count: row.get::<_, i64>("word_count")? as u64,
+        sametypesequence: row.get("sametypesequence")?,
+        ifo_path: row.get("ifo_path")?,
+        idx_path: row.get("idx_path")?,
+        dict_path: row.get("dict_path")?,
+    })
+}
+
+pub fn list_dictionaries(conn: &Connection) -> Result<Vec<DictionaryMeta>, AppError> {
+    let mut statement = conn
+        .prepare("SELECT id, name, word_count, sametypesequence, ifo_path, idx_path, dict_path FROM dictionaries ORDER BY name")
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to query dictionaries").with_cause(err))?;
+    let dictionaries = statement
+        .query_map([], row_to_dictionary)
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read dictionaries").with_cause(err)
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read dictionary row").with_cause(err)
+        })?;
+    Ok(dictionaries)
+}
+
+pub fn remove_dictionary(conn: &Connection, id: &str) -> Result<bool, AppError> {
+    let removed = conn
+        .execute("DELETE FROM dictionaries WHERE id = ?1", [id])
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to remove dictionary").with_cause(err)
+        })?;
+    Ok(removed > 0)
+}
+
+/// Register flow: validate the `.ifo`, require the sibling `.idx` and
+/// `.dict(.dz)`, allow all three on the asset protocol, upsert the record.
 pub fn register_dictionary(
-    base: &Path,
+    conn: &Connection,
     raw_path: &str,
     allow_asset: &dyn Fn(&Path) -> Result<(), AppError>,
 ) -> Result<DictionaryMeta, AppError> {
@@ -166,11 +164,8 @@ pub fn register_dictionary(
 
     let mut hasher = Sha256::new();
     hasher.update(raw_path.as_bytes());
-    let id: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let digest = hasher.finalize();
+    let id: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
 
     let meta = DictionaryMeta {
         id: id[..32].to_string(),
@@ -181,50 +176,45 @@ pub fn register_dictionary(
         idx_path: idx.to_string_lossy().to_string(),
         dict_path: dict.to_string_lossy().to_string(),
     };
-    let mut store = load_store(base)?;
-    store.dictionaries.retain(|d| d.id != meta.id);
-    store.dictionaries.push(meta.clone());
-    save_store(base, &store)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO dictionaries (id, name, word_count, sametypesequence, ifo_path, idx_path, dict_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            meta.id,
+            meta.name,
+            meta.word_count as i64,
+            meta.sametypesequence,
+            meta.ifo_path,
+            meta.idx_path,
+            meta.dict_path
+        ],
+    )
+    .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to save dictionary").with_cause(err))?;
     Ok(meta)
 }
 
-pub fn list_dictionaries(base: &Path) -> Result<Vec<DictionaryMeta>, AppError> {
-    let mut dictionaries = load_store(base)?.dictionaries;
-    dictionaries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(dictionaries)
-}
-
-pub fn remove_dictionary(base: &Path, id: &str) -> Result<bool, AppError> {
-    let mut store = load_store(base)?;
-    let before = store.dictionaries.len();
-    store.dictionaries.retain(|d| d.id != id);
-    let removed = store.dictionaries.len() != before;
-    if removed {
-        save_store(base, &store)?;
-    }
-    Ok(removed)
-}
-
-pub fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
-    app.path().app_data_dir().map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "app data directory unavailable").with_cause(err)
-    })
-}
-
 #[tauri::command(rename = "dictionary.list")]
-pub fn dictionary_list(app: tauri::AppHandle) -> Result<DictionaryListResponse, AppError> {
+pub fn dictionary_list(
+    db: tauri::State<'_, crate::storage::Db>,
+) -> Result<DictionaryListResponse, AppError> {
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     Ok(DictionaryListResponse {
-        dictionaries: list_dictionaries(&data_dir(&app)?)?,
+        dictionaries: list_dictionaries(&conn)?,
     })
 }
 
 #[tauri::command(rename = "dictionary.register")]
 pub fn dictionary_register(
     app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: DictionaryRegisterRequest,
 ) -> Result<DictionaryRegisterResponse, AppError> {
-    let base = data_dir(&app)?;
-    let dictionary = register_dictionary(&base, &request.path, &|path| {
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    let dictionary = register_dictionary(&conn, &request.path, &|path| {
         app.asset_protocol_scope().allow_file(path).map_err(|err| {
             AppError::new(
                 ErrorCode::SecurityValidationFailed,
@@ -238,11 +228,14 @@ pub fn dictionary_register(
 
 #[tauri::command(rename = "dictionary.remove")]
 pub fn dictionary_remove(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: DictionaryRemoveRequest,
 ) -> Result<DictionaryRemoveResponse, AppError> {
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     Ok(DictionaryRemoveResponse {
-        removed: remove_dictionary(&data_dir(&app)?, &request.id)?,
+        removed: remove_dictionary(&conn, &request.id)?,
     })
 }
 
@@ -250,16 +243,10 @@ pub fn dictionary_remove(
 mod tests {
     use super::*;
 
-    fn temp_base(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "reader-dict-test-{tag}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::migrate(&conn).unwrap();
+        conn
     }
 
     fn no_asset(_path: &Path) -> Result<(), AppError> {
@@ -282,53 +269,85 @@ mod tests {
 
     #[test]
     fn register_requires_idx_and_dict_siblings() {
-        let base = temp_base("siblings");
+        let conn = memory_db();
+        let base = std::env::temp_dir().join(format!(
+            "reader-dict-siblings-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
         let ifo = base.join("test.ifo");
         std::fs::write(&ifo, "bookname=T\nwordcount=1\n").unwrap();
-        assert!(register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).is_err());
+        assert!(register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).is_err());
 
         std::fs::write(base.join("test.idx"), b"").unwrap();
-        assert!(register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).is_err());
+        assert!(register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).is_err());
 
         std::fs::write(base.join("test.dict.dz"), b"").unwrap();
-        let meta = register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).unwrap();
+        let meta = register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).unwrap();
         assert_eq!(meta.name, "T");
         assert_eq!(meta.word_count, 1);
     }
 
     #[test]
     fn non_ifo_paths_are_rejected() {
-        let base = temp_base("nonifo");
+        let conn = memory_db();
+        let base = std::env::temp_dir().join(format!(
+            "reader-dict-nonifo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
         let txt = base.join("test.txt");
         std::fs::write(&txt, "x").unwrap();
-        let err = register_dictionary(&base, txt.to_str().unwrap(), &no_asset)
+        let err = register_dictionary(&conn, txt.to_str().unwrap(), &no_asset)
             .expect_err("non-ifo must be rejected");
         assert_eq!(err.code.as_str(), "SYSTEM_VALIDATION");
     }
 
     #[test]
     fn list_remove_round_trip() {
-        let base = temp_base("roundtrip");
+        let conn = memory_db();
+        let base = std::env::temp_dir().join(format!(
+            "reader-dict-roundtrip-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
         let ifo = base.join("d.ifo");
         std::fs::write(&ifo, "bookname=词典A\nwordcount=10\n").unwrap();
         std::fs::write(base.join("d.idx"), b"").unwrap();
         std::fs::write(base.join("d.dict"), b"").unwrap();
-        let meta = register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).unwrap();
+        let meta = register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).unwrap();
 
-        assert_eq!(list_dictionaries(&base).unwrap(), vec![meta.clone()]);
-        assert!(remove_dictionary(&base, &meta.id).unwrap());
-        assert!(list_dictionaries(&base).unwrap().is_empty());
+        assert_eq!(list_dictionaries(&conn).unwrap(), vec![meta.clone()]);
+        assert!(remove_dictionary(&conn, &meta.id).unwrap());
+        assert!(list_dictionaries(&conn).unwrap().is_empty());
     }
 
     #[test]
     fn register_is_an_upsert_by_path() {
-        let base = temp_base("upsert");
+        let conn = memory_db();
+        let base = std::env::temp_dir().join(format!(
+            "reader-dict-upsert-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
         let ifo = base.join("d.ifo");
         std::fs::write(&ifo, "bookname=词典A\nwordcount=10\n").unwrap();
         std::fs::write(base.join("d.idx"), b"").unwrap();
         std::fs::write(base.join("d.dict"), b"").unwrap();
-        register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).unwrap();
-        register_dictionary(&base, ifo.to_str().unwrap(), &no_asset).unwrap();
-        assert_eq!(list_dictionaries(&base).unwrap().len(), 1);
+        register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).unwrap();
+        register_dictionary(&conn, ifo.to_str().unwrap(), &no_asset).unwrap();
+        assert_eq!(list_dictionaries(&conn).unwrap().len(), 1);
     }
 }

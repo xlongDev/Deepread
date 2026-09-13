@@ -7,11 +7,12 @@
 //! `@deepread/ai-core` on the frontend — Rust is a dumb, safe pipe.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::StreamExt;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::ipc::Channel;
@@ -37,34 +38,75 @@ pub struct AiProviderConfig {
     pub embedding_model: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AiConfigStore {
-    #[serde(default)]
-    providers: Vec<AiProviderConfig>,
-}
-
-fn config_store_path(base: &Path) -> PathBuf {
-    base.join("ai-config.json")
-}
-
-fn load_configs(base: &Path) -> AiConfigStore {
-    std::fs::read_to_string(config_store_path(base))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+fn load_providers(conn: &Connection) -> Vec<AiProviderConfig> {
+    let mut statement = match conn.prepare(
+        "SELECT id, name, base_url, model, embedding_model FROM ai_providers ORDER BY rowid",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return Vec::new(),
+    };
+    statement
+        .query_map([], |row| {
+            Ok(AiProviderConfig {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                model: row.get(3)?,
+                embedding_model: row.get(4)?,
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
 }
 
-fn save_configs(base: &Path, store: &AiConfigStore) -> Result<(), AppError> {
-    std::fs::create_dir_all(base).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to create data directory").with_cause(err)
+fn upsert_provider(conn: &Connection, provider: &AiProviderConfig) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO ai_providers (id, name, base_url, model, embedding_model)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            provider.id,
+            provider.name,
+            provider.base_url,
+            provider.model,
+            provider.embedding_model
+        ],
+    )
+    .map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to save provider").with_cause(err)
     })?;
-    let bytes = serde_json::to_vec_pretty(store).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to serialize ai config").with_cause(err)
-    })?;
-    std::fs::write(config_store_path(base), bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to write ai config").with_cause(err)
+    Ok(())
+}
+
+fn provider_by_id(conn: &Connection, id: &str) -> Result<Option<AiProviderConfig>, AppError> {
+    conn.query_row(
+        "SELECT id, name, base_url, model, embedding_model FROM ai_providers WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(AiProviderConfig {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                model: row.get(3)?,
+                embedding_model: row.get(4)?,
+            })
+        },
+    )
+    .map(Some)
+    .or_else(|err| match err {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => {
+            Err(AppError::new(ErrorCode::StorageIo, "failed to read provider").with_cause(other))
+        }
     })
+}
+
+fn remove_provider_row(conn: &Connection, id: &str) -> Result<bool, AppError> {
+    let removed = conn
+        .execute("DELETE FROM ai_providers WHERE id = ?1", [id])
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to remove provider").with_cause(err)
+        })?;
+    Ok(removed > 0)
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,9 +147,14 @@ pub fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
 }
 
 #[tauri::command(rename = "ai.config.list")]
-pub fn ai_config_list(app: tauri::AppHandle) -> Result<AiConfigListResponse, AppError> {
+pub fn ai_config_list(
+    db: tauri::State<'_, crate::storage::Db>,
+) -> Result<AiConfigListResponse, AppError> {
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     Ok(AiConfigListResponse {
-        providers: load_configs(&data_dir(&app)?).providers,
+        providers: load_providers(&conn),
     })
 }
 
@@ -116,13 +163,14 @@ pub fn ai_config_list(app: tauri::AppHandle) -> Result<AiConfigListResponse, App
 pub fn ai_config_save(
     app: tauri::AppHandle,
     secrets: State<'_, SecretStore>,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiConfigSaveRequest,
 ) -> Result<AiConfigSaveResponse, AppError> {
     let base = data_dir(&app)?;
-    let mut store = load_configs(&base);
-    store.providers.retain(|p| p.id != request.provider.id);
-    store.providers.push(request.provider.clone());
-    save_configs(&base, &store)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    upsert_provider(&conn, &request.provider)?;
 
     let key = format!("ai.key.{}", request.provider.id);
     crate::secrets::set_secret(&secrets, &base, &key, &request.api_key)?;
@@ -135,15 +183,15 @@ pub fn ai_config_save(
 pub fn ai_config_remove(
     app: tauri::AppHandle,
     secrets: State<'_, SecretStore>,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiConfigRemoveRequest,
 ) -> Result<AiConfigRemoveResponse, AppError> {
     let base = data_dir(&app)?;
-    let mut store = load_configs(&base);
-    let before = store.providers.len();
-    store.providers.retain(|p| p.id != request.id);
-    let removed = store.providers.len() != before;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    let removed = remove_provider_row(&conn, &request.id)?;
     if removed {
-        save_configs(&base, &store)?;
         let key = format!("ai.key.{}", request.id);
         crate::secrets::delete_secret(&secrets, &base, &key)?;
     }
@@ -248,55 +296,63 @@ pub fn validate_artifact_kind(kind: &str) -> Result<(), AppError> {
     }
 }
 
-pub fn artifact_path(base: &Path, book_hash: &str, kind: &str) -> Result<PathBuf, AppError> {
-    crate::state::validate_hash(book_hash)?;
-    validate_artifact_kind(kind)?;
-    Ok(base
-        .join("ai-artifact")
-        .join(format!("{book_hash}-{kind}.json")))
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredArtifact {
     pub payload: Value,
     pub created_at: String,
 }
 
-pub fn load_artifact(path: &Path) -> Result<Option<StoredArtifact>, AppError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(
-                AppError::new(ErrorCode::StorageIo, "failed to read artifact").with_cause(err),
-            );
+pub fn load_artifact(
+    conn: &Connection,
+    hash: &str,
+    kind: &str,
+) -> Result<Option<StoredArtifact>, AppError> {
+    crate::state::validate_hash(hash)?;
+    validate_artifact_kind(kind)?;
+    let result: Result<(String, String), rusqlite::Error> = conn.query_row(
+        "SELECT payload, created_at FROM ai_artifacts WHERE book_hash = ?1 AND kind = ?2",
+        rusqlite::params![hash, kind],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    );
+    match result {
+        Ok((payload_text, created_at)) => {
+            let payload: Value = serde_json::from_str(&payload_text).map_err(|err| {
+                AppError::new(ErrorCode::StorageCorrupt, "artifact is corrupted").with_cause(err)
+            })?;
+            Ok(Some(StoredArtifact {
+                payload,
+                created_at,
+            }))
         }
-    };
-    if bytes.len() > MAX_ARTIFACT_BYTES {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(other) => {
+            Err(AppError::new(ErrorCode::StorageIo, "failed to read artifact").with_cause(other))
+        }
+    }
+}
+
+pub fn store_artifact(
+    conn: &Connection,
+    hash: &str,
+    kind: &str,
+    payload: &Value,
+    created_at: &str,
+) -> Result<(), AppError> {
+    crate::state::validate_hash(hash)?;
+    validate_artifact_kind(kind)?;
+    if payload.to_string().len() > MAX_ARTIFACT_BYTES {
         return Err(AppError::new(
             ErrorCode::StorageCorrupt,
             "artifact is too large",
         ));
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
-        AppError::new(ErrorCode::StorageCorrupt, "artifact is corrupted").with_cause(err)
-    })
-}
-
-pub fn store_artifact(path: &Path, artifact: &StoredArtifact) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            AppError::new(ErrorCode::StorageIo, "failed to create artifact directory")
-                .with_cause(err)
-        })?;
-    }
-    let bytes = serde_json::to_vec(artifact).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to serialize artifact").with_cause(err)
-    })?;
-    std::fs::write(path, bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to write artifact").with_cause(err)
-    })
+    conn.execute(
+        "INSERT OR REPLACE INTO ai_artifacts (book_hash, kind, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![hash, kind, payload.to_string(), created_at],
+    )
+    .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to save artifact").with_cause(err))?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,78 +385,88 @@ pub struct AiArtifactSetResponse {
 
 #[tauri::command(rename = "ai.artifact.get")]
 pub fn ai_artifact_get(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiArtifactGetRequest,
 ) -> Result<AiArtifactGetResponse, AppError> {
-    let path = artifact_path(&data_dir(&app)?, &request.book_hash, &request.kind)?;
-    Ok(match load_artifact(&path)? {
-        Some(stored) => AiArtifactGetResponse {
-            payload: Some(stored.payload),
-            created_at: Some(stored.created_at),
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    Ok(
+        match load_artifact(&conn, &request.book_hash, &request.kind)? {
+            Some(stored) => AiArtifactGetResponse {
+                payload: Some(stored.payload),
+                created_at: Some(stored.created_at),
+            },
+            None => AiArtifactGetResponse {
+                payload: None,
+                created_at: None,
+            },
         },
-        None => AiArtifactGetResponse {
-            payload: None,
-            created_at: None,
-        },
-    })
+    )
 }
 
 #[tauri::command(rename = "ai.artifact.set")]
 pub fn ai_artifact_set(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiArtifactSetRequest,
 ) -> Result<AiArtifactSetResponse, AppError> {
-    let path = artifact_path(&data_dir(&app)?, &request.book_hash, &request.kind)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     store_artifact(
-        &path,
-        &StoredArtifact {
-            payload: request.payload,
-            created_at: crate::timestamps::rfc3339_now(),
-        },
+        &conn,
+        &request.book_hash,
+        &request.kind,
+        &request.payload,
+        &crate::timestamps::rfc3339_now(),
     )?;
     Ok(AiArtifactSetResponse {
         saved_at: crate::timestamps::rfc3339_now(),
     })
 }
 
-pub fn index_path(base: &Path, book_hash: &str) -> Result<PathBuf, AppError> {
-    crate::state::validate_hash(book_hash)?;
-    Ok(base.join("ai-index").join(format!("{book_hash}.json")))
+pub fn load_index(conn: &Connection, hash: &str) -> Result<Option<AiIndexPayload>, AppError> {
+    crate::state::validate_hash(hash)?;
+    let result: Result<(String, String, String), rusqlite::Error> = conn.query_row(
+        "SELECT chunks, embedding_model, created_at FROM ai_index WHERE book_hash = ?1",
+        [hash],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    );
+    match result {
+        Ok((chunks_text, embedding_model, created_at)) => {
+            let chunks: Vec<AiIndexChunk> = serde_json::from_str(&chunks_text).map_err(|err| {
+                AppError::new(ErrorCode::StorageCorrupt, "ai index is corrupted").with_cause(err)
+            })?;
+            Ok(Some(AiIndexPayload {
+                chunks,
+                embedding_model,
+                created_at,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(other) => {
+            Err(AppError::new(ErrorCode::StorageIo, "failed to read ai index").with_cause(other))
+        }
+    }
 }
 
-pub fn load_index(path: &Path) -> Result<Option<AiIndexPayload>, AppError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(
-                AppError::new(ErrorCode::StorageIo, "failed to read ai index").with_cause(err),
-            );
-        }
-    };
-    if bytes.len() > MAX_INDEX_BYTES {
+pub fn store_index(conn: &Connection, hash: &str, index: &AiIndexPayload) -> Result<(), AppError> {
+    crate::state::validate_hash(hash)?;
+    let chunks = serde_json::to_string(&index.chunks).map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to serialize chunks").with_cause(err)
+    })?;
+    if chunks.len() > MAX_INDEX_BYTES {
         return Err(AppError::new(
             ErrorCode::StorageCorrupt,
             "ai index is too large",
         ));
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
-        AppError::new(ErrorCode::StorageCorrupt, "ai index is corrupted").with_cause(err)
-    })
-}
-
-pub fn store_index(path: &Path, index: &AiIndexPayload) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            AppError::new(ErrorCode::StorageIo, "failed to create index directory").with_cause(err)
-        })?;
-    }
-    let bytes = serde_json::to_vec(index).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to serialize ai index").with_cause(err)
-    })?;
-    std::fs::write(path, bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to write ai index").with_cause(err)
-    })
+    conn.execute(
+        "INSERT OR REPLACE INTO ai_index (book_hash, chunks, embedding_model, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![hash, chunks, index.embedding_model, index.created_at],
+    )
+    .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to save ai index").with_cause(err))?;
+    Ok(())
 }
 
 /// POST /embeddings through the provider and return the vectors.
@@ -547,15 +613,18 @@ pub async fn ai_chat(
     app: tauri::AppHandle,
     state: State<'_, AiState>,
     secrets: State<'_, SecretStore>,
+    db: State<'_, crate::storage::Db>,
     request: AiChatRequest,
     on_event: Channel<Value>,
 ) -> Result<AiChatResponse, AppError> {
     let base = data_dir(&app)?;
-    let config = load_configs(&base)
-        .providers
-        .into_iter()
-        .find(|p| p.id == request.config_id)
-        .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "AI 服务配置不存在"))?;
+    let config = {
+        let conn =
+            db.0.lock()
+                .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+        provider_by_id(&conn, &request.config_id)?
+            .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "AI 服务配置不存在"))?
+    };
     let key = format!("ai.key.{}", request.config_id);
     let api_key = crate::secrets::get_secret(&secrets, &base, &key)?
         .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "请先填写该服务的 API Key"))?;
@@ -606,14 +675,17 @@ pub async fn ai_chat(
 pub async fn ai_embed(
     app: tauri::AppHandle,
     secrets: State<'_, SecretStore>,
+    db: State<'_, crate::storage::Db>,
     request: AiEmbedRequest,
 ) -> Result<AiEmbedResponse, AppError> {
     let base = data_dir(&app)?;
-    let config = load_configs(&base)
-        .providers
-        .into_iter()
-        .find(|p| p.id == request.config_id)
-        .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "AI 服务配置不存在"))?;
+    let config = {
+        let conn =
+            db.0.lock()
+                .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+        provider_by_id(&conn, &request.config_id)?
+            .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "AI 服务配置不存在"))?
+    };
     let key = format!("ai.key.{}", request.config_id);
     let api_key = crate::secrets::get_secret(&secrets, &base, &key)?
         .ok_or_else(|| AppError::new(ErrorCode::AiProviderError, "请先填写该服务的 API Key"))?;
@@ -629,22 +701,26 @@ pub async fn ai_embed(
 
 #[tauri::command(rename = "ai.index.get")]
 pub fn ai_index_get(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiIndexGetRequest,
 ) -> Result<AiIndexGetResponse, AppError> {
-    let path = index_path(&data_dir(&app)?, &request.book_hash)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     Ok(AiIndexGetResponse {
-        index: load_index(&path)?,
+        index: load_index(&conn, &request.book_hash)?,
     })
 }
 
 #[tauri::command(rename = "ai.index.set")]
 pub fn ai_index_set(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: AiIndexSetRequest,
 ) -> Result<AiIndexSetResponse, AppError> {
-    let path = index_path(&data_dir(&app)?, &request.book_hash)?;
-    store_index(&path, &request.index)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    store_index(&conn, &request.book_hash, &request.index)?;
     Ok(AiIndexSetResponse {
         saved_at: crate::timestamps::rfc3339_now(),
     })
@@ -680,17 +756,16 @@ mod tests {
         );
     }
 
+    fn memory_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::migrate(&conn).unwrap();
+        conn
+    }
+
     #[test]
     fn index_store_round_trips() {
-        let base = std::env::temp_dir().join(format!(
-            "reader-ai-index-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let conn = memory_db();
         let hash = "23821135d4c62f1428fd15ddb9e91d695402727f43b13a6eb3e9f31fc01b4072";
-        let path = index_path(&base, hash).unwrap();
         let index = AiIndexPayload {
             chunks: vec![AiIndexChunk {
                 label: "第一章".into(),
@@ -700,53 +775,53 @@ mod tests {
             embedding_model: "mock-embedding".into(),
             created_at: "2026-09-13T00:00:00Z".into(),
         };
-        store_index(&path, &index).unwrap();
-        assert_eq!(load_index(&path).unwrap(), Some(index));
-        assert!(index_path(&base, "../evil").is_err());
+        store_index(&conn, hash, &index).unwrap();
+        let reloaded = load_index(&conn, hash).unwrap();
+        assert_eq!(reloaded.as_ref(), Some(&index));
+        assert!(store_index(&conn, "../evil", &index).is_err());
     }
 
     #[test]
     fn artifact_store_round_trips_and_rejects_bad_kinds() {
-        let base = std::env::temp_dir().join(format!(
-            "reader-ai-artifact-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let conn = memory_db();
         let hash = "23821135d4c62f1428fd15ddb9e91d695402727f43b13a6eb3e9f31fc01b4072";
-        let path = artifact_path(&base, hash, "summary").unwrap();
         let artifact = StoredArtifact {
             payload: json!({"overview": "雪季的故事", "themes": ["灯"]}),
             created_at: "2026-09-13T00:00:00Z".into(),
         };
-        store_artifact(&path, &artifact).unwrap();
-        assert_eq!(load_artifact(&path).unwrap(), Some(artifact));
-        assert_eq!(load_artifact(&base.join("missing.json")).unwrap(), None);
-        assert!(artifact_path(&base, hash, "evil").is_err());
-        assert!(artifact_path(&base, "../../evil", "summary").is_err());
+        store_artifact(
+            &conn,
+            hash,
+            "summary",
+            &artifact.payload,
+            &artifact.created_at,
+        )
+        .unwrap();
+        assert_eq!(
+            load_artifact(&conn, hash, "summary").unwrap(),
+            Some(artifact)
+        );
+        assert_eq!(load_artifact(&conn, hash, "notes").unwrap(), None);
+        assert!(store_artifact(&conn, hash, "evil", &json!({}), "t").is_err());
+        assert!(load_artifact(&conn, "../../evil", "summary").is_err());
     }
 
     #[test]
     fn config_store_round_trips() {
-        let base = std::env::temp_dir().join(format!(
-            "reader-ai-config-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let conn = memory_db();
         let provider = AiProviderConfig {
             id: "0123456789abcdef".into(),
             name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-chat".into(),
+            model: "deepseek-v4-pro".into(),
             embedding_model: None,
         };
-        let mut store = load_configs(&base);
-        assert!(store.providers.is_empty());
-        store.providers.push(provider.clone());
-        save_configs(&base, &store).unwrap();
-        assert_eq!(load_configs(&base).providers, vec![provider]);
+        assert!(load_providers(&conn).is_empty());
+        upsert_provider(&conn, &provider).unwrap();
+        // re-upsert is a no-op duplicate
+        upsert_provider(&conn, &provider).unwrap();
+        assert_eq!(load_providers(&conn), vec![provider.clone()]);
+        assert!(remove_provider_row(&conn, &provider.id).unwrap());
+        assert!(load_providers(&conn).is_empty());
     }
 }

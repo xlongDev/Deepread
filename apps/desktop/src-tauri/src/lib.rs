@@ -12,6 +12,7 @@ mod events;
 mod library;
 mod secrets;
 mod state;
+mod storage;
 mod timestamps;
 
 use log::{info, warn};
@@ -21,6 +22,14 @@ use tauri::Emitter;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            use tauri::Manager;
+            let base = app.path().app_data_dir()?;
+            let conn = storage::open_db(&library::database_path(&base))?;
+            storage::import_legacy(&conn, &base)?;
+            app.manage(storage::Db(std::sync::Mutex::new(conn)));
+            Ok(())
+        })
         .manage(ai::AiState::default())
         .manage(secrets::SecretStore::Keyring)
         .plugin(

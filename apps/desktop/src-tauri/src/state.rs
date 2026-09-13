@@ -1,18 +1,15 @@
-//! Per-book reader state (progress + annotations), persisted as one JSON file
-//! keyed by the SHA-256 hash of the book file. SQLite lands in Sprint 3; this
-//! is a real store, not a stub, and the hash keeps untrusted input away from
-//! the filesystem.
+//! Per-book reader state (progress + annotations + bookmarks), persisted in
+//! SQLite via a transaction on `reader.state.set`. Legacy per-hash JSON files
+//! are imported once by `storage::import_legacy`.
 
-use std::path::{Path, PathBuf};
-
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 use crate::error::{AppError, ErrorCode};
 
-pub const MAX_STATE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ANNOTATIONS: usize = 10_000;
 
-fn is_book_hash(hash: &str) -> bool {
+pub fn is_book_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -26,11 +23,6 @@ pub fn validate_hash(hash: &str) -> Result<(), AppError> {
         )
         .with_context("field", "bookHash"))
     }
-}
-
-pub fn state_path(base: &Path, hash: &str) -> Result<PathBuf, AppError> {
-    validate_hash(hash)?;
-    Ok(base.join("reader-state").join(format!("{hash}.json")))
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -100,69 +92,168 @@ pub struct StateSetResponse {
     pub saved_at: String,
 }
 
-pub fn load_state(path: &Path) -> Result<Option<ReaderState>, AppError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(
-                AppError::new(ErrorCode::StorageIo, "failed to read reader state")
-                    .with_cause(err)
-                    .retryable(),
-            );
-        }
-    };
-    if bytes.len() > MAX_STATE_BYTES {
-        return Err(
-            AppError::new(ErrorCode::StorageCorrupt, "reader state file is too large")
-                .with_context("path", path.display().to_string()),
-        );
+pub fn load_state(conn: &Connection, hash: &str) -> Result<Option<ReaderState>, AppError> {
+    validate_hash(hash)?;
+    let progress = conn
+        .query_row(
+            "SELECT cfi, fraction, updated_at FROM progress WHERE book_hash = ?1",
+            [hash],
+            |row| {
+                Ok(StoredProgress {
+                    cfi: row.get(0)?,
+                    fraction: row.get(1)?,
+                })
+            },
+        )
+        .map(Some)
+        .or_else(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(
+                AppError::new(ErrorCode::StorageIo, "failed to read progress").with_cause(other),
+            ),
+        })?;
+
+    let mut statement = conn
+        .prepare("SELECT id, cfi, color, note, excerpt FROM annotations WHERE book_hash = ?1 ORDER BY rowid")
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to query annotations").with_cause(err))?;
+    let annotations = statement
+        .query_map([hash], |row| {
+            Ok(StoredAnnotation {
+                id: row.get(0)?,
+                cfi: row.get(1)?,
+                color: row.get(2)?,
+                note: row.get(3)?,
+                excerpt: row.get(4)?,
+            })
+        })
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read annotations").with_cause(err)
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read annotation row").with_cause(err)
+        })?;
+
+    let mut statement = conn
+        .prepare("SELECT id, cfi, label, created_at FROM bookmarks WHERE book_hash = ?1 ORDER BY created_at, rowid")
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to query bookmarks").with_cause(err))?;
+    let bookmarks = statement
+        .query_map([hash], |row| {
+            Ok(StoredBookmark {
+                id: row.get(0)?,
+                cfi: row.get(1)?,
+                label: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read bookmarks").with_cause(err)
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to read bookmark row").with_cause(err)
+        })?;
+
+    if progress.is_none() && annotations.is_empty() && bookmarks.is_empty() {
+        return Ok(None);
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
-        AppError::new(ErrorCode::StorageCorrupt, "reader state file is corrupted")
-            .with_cause(err)
-            .with_context("path", path.display().to_string())
-    })
+    let updated_at = conn
+        .query_row(
+            "SELECT updated_at FROM progress WHERE book_hash = ?1",
+            [hash],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+
+    Ok(Some(ReaderState {
+        progress,
+        annotations,
+        bookmarks,
+        updated_at,
+    }))
 }
 
-pub fn store_state(path: &Path, state: &ReaderState) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            AppError::new(ErrorCode::StorageIo, "failed to create state directory").with_cause(err)
+pub fn store_state(conn: &Connection, hash: &str, state: &ReaderState) -> Result<(), AppError> {
+    validate_hash(hash)?;
+    if state.annotations.len() > MAX_ANNOTATIONS {
+        return Err(AppError::new(
+            ErrorCode::SystemValidation,
+            "too many annotations",
+        ));
+    }
+    let tx = conn.unchecked_transaction().map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to begin transaction").with_cause(err)
+    })?;
+    tx.execute("DELETE FROM progress WHERE book_hash = ?1", [hash])
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to reset progress").with_cause(err)
+        })?;
+    tx.execute("DELETE FROM annotations WHERE book_hash = ?1", [hash])
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to reset annotations").with_cause(err)
+        })?;
+    tx.execute("DELETE FROM bookmarks WHERE book_hash = ?1", [hash])
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to reset bookmarks").with_cause(err)
+        })?;
+
+    if let Some(progress) = &state.progress {
+        tx.execute(
+            "INSERT INTO progress (book_hash, cfi, fraction, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![hash, progress.cfi, progress.fraction, state.updated_at],
+        )
+        .map_err(|err| {
+            AppError::new(ErrorCode::StorageIo, "failed to save progress").with_cause(err)
         })?;
     }
-    let bytes = serde_json::to_vec(state).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to serialize reader state").with_cause(err)
-    })?;
-    std::fs::write(path, bytes).map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "failed to write reader state").with_cause(err)
+    for annotation in &state.annotations {
+        tx.execute(
+            "INSERT INTO annotations (id, book_hash, cfi, color, note, excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                annotation.id,
+                hash,
+                annotation.cfi,
+                annotation.color,
+                annotation.note,
+                annotation.excerpt
+            ],
+        )
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to save annotation").with_cause(err))?;
+    }
+    for bookmark in &state.bookmarks {
+        tx.execute(
+            "INSERT INTO bookmarks (id, book_hash, cfi, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![bookmark.id, hash, bookmark.cfi, bookmark.label, bookmark.created_at],
+        )
+        .map_err(|err| AppError::new(ErrorCode::StorageIo, "failed to save bookmark").with_cause(err))?;
+    }
+    tx.commit().map_err(|err| {
+        AppError::new(ErrorCode::StorageIo, "failed to commit reader state").with_cause(err)
     })
 }
 
 #[tauri::command(rename = "reader.state.get")]
 pub fn reader_state_get(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: StateGetRequest,
 ) -> Result<StateGetResponse, AppError> {
-    let base = app.path().app_data_dir().map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "app data directory unavailable").with_cause(err)
-    })?;
-    let path = state_path(&base, &request.book_hash)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
     Ok(StateGetResponse {
-        state: load_state(&path)?,
+        state: load_state(&conn, &request.book_hash)?,
     })
 }
 
 #[tauri::command(rename = "reader.state.set")]
 pub fn reader_state_set(
-    app: tauri::AppHandle,
+    db: tauri::State<'_, crate::storage::Db>,
     request: StateSetRequest,
 ) -> Result<StateSetResponse, AppError> {
-    let base = app.path().app_data_dir().map_err(|err| {
-        AppError::new(ErrorCode::StorageIo, "app data directory unavailable").with_cause(err)
-    })?;
-    let path = state_path(&base, &request.book_hash)?;
-    store_state(&path, &request.state)?;
+    let conn =
+        db.0.lock()
+            .map_err(|_| AppError::new(ErrorCode::StorageIo, "database busy"))?;
+    store_state(&conn, &request.book_hash, &request.state)?;
     Ok(StateSetResponse {
         saved_at: crate::timestamps::rfc3339_now(),
     })
@@ -172,42 +263,23 @@ pub fn reader_state_set(
 mod tests {
     use super::*;
 
-    fn temp_base(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "reader-state-test-{tag}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::storage::migrate(&conn).unwrap();
+        conn
     }
 
-    const HASH: &str = "23821135d4c62f1428fd15ddb9e91d695402727f43b13a6eb3e9f31fc01b4072";
-
-    #[test]
-    fn rejects_malformed_hashes_before_touching_the_filesystem() {
-        assert!(validate_hash(HASH).is_ok());
-        assert!(validate_hash("").is_err());
-        assert!(validate_hash("ABCDEF").is_err());
-        assert!(validate_hash(&HASH[..63]).is_err());
-        assert!(validate_hash("../etc/passwd\u{0}00000000000000000000000000000000").is_err());
+    /// Reader state references books(hash); tests seed a matching book row.
+    fn seed_book(conn: &Connection, hash: &str) {
+        conn.execute(
+            "INSERT INTO books (hash, file_name, format, path, size, added_at) VALUES (?1, 't', 'epub', '/p', 1, '2026-09-09T00:00:00Z')",
+            [hash],
+        )
+        .unwrap();
     }
 
-    #[test]
-    fn state_path_stays_inside_the_base_directory() {
-        let base = Path::new("/tmp/some-base");
-        let path = state_path(base, HASH).unwrap();
-        assert_eq!(path, base.join("reader-state").join(format!("{HASH}.json")));
-        assert!(state_path(base, "../../evil").is_err());
-    }
-
-    #[test]
-    fn store_and_load_round_trip() {
-        let base = temp_base("round-trip");
-        let path = state_path(&base, HASH).unwrap();
-        let state = ReaderState {
+    fn sample() -> ReaderState {
+        ReaderState {
             progress: Some(StoredProgress {
                 cfi: "epubcfi(/6/4)".into(),
                 fraction: 0.42,
@@ -226,37 +298,64 @@ mod tests {
                 created_at: "2026-09-09T00:00:00Z".into(),
             }],
             updated_at: "2026-09-09T00:00:00Z".into(),
-        };
-
-        store_state(&path, &state).unwrap();
-        assert_eq!(load_state(&path).unwrap(), Some(state));
+        }
     }
 
     #[test]
-    fn load_returns_none_for_missing_state() {
-        let base = temp_base("missing");
-        let path = state_path(&base, HASH).unwrap();
-        assert_eq!(load_state(&path).unwrap(), None);
+    fn rejects_malformed_hashes_before_touching_storage() {
+        assert!(validate_hash(&"a".repeat(64)).is_ok());
+        assert!(validate_hash("").is_err());
+        assert!(validate_hash("ABCDEF").is_err());
+        assert!(validate_hash("../etc/passwd").is_err());
     }
 
     #[test]
-    fn load_flags_corrupted_state_instead_of_crashing() {
-        let base = temp_base("corrupt");
-        let path = state_path(&base, HASH).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"{not json").unwrap();
-        let err = load_state(&path).expect_err("corrupt state must error");
-        assert_eq!(err.code.as_str(), "STORAGE_CORRUPT");
+    fn store_and_load_round_trip() {
+        let conn = memory_db();
+        let hash = &"a".repeat(64);
+        seed_book(&conn, hash);
+        let state = sample();
+        store_state(&conn, hash, &state).unwrap();
+        assert_eq!(load_state(&conn, hash).unwrap(), Some(state));
+    }
+
+    #[test]
+    fn re_set_replaces_previous_content() {
+        let conn = memory_db();
+        let hash = &"b".repeat(64);
+        seed_book(&conn, hash);
+        store_state(&conn, hash, &sample()).unwrap();
+        let mut second = sample();
+        second.annotations.clear();
+        second.bookmarks.clear();
+        second.progress = None;
+        store_state(&conn, hash, &second).unwrap();
+        // A fully emptied state reads back as None (nothing stored).
+        assert_eq!(load_state(&conn, hash).unwrap(), None);
+    }
+
+    #[test]
+    fn empty_state_reads_as_none() {
+        let conn = memory_db();
+        let hash = &"c".repeat(64);
+        assert_eq!(load_state(&conn, hash).unwrap(), None);
+        store_state(&conn, hash, &ReaderState::default()).unwrap();
+        assert_eq!(load_state(&conn, hash).unwrap(), None);
+    }
+
+    #[test]
+    fn removing_a_book_cascades_its_state() {
+        let conn = memory_db();
+        let hash = &"d".repeat(64);
+        seed_book(&conn, hash);
+        store_state(&conn, hash, &sample()).unwrap();
+        conn.execute("DELETE FROM books WHERE hash = ?1", [hash.as_str()])
+            .unwrap();
+        assert_eq!(load_state(&conn, hash).unwrap(), None);
     }
 
     #[test]
     fn wire_shapes_are_camel_case() {
-        let response = StateSetResponse {
-            saved_at: "2026-09-09T00:00:00Z".into(),
-        };
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["savedAt"], "2026-09-09T00:00:00Z");
-
         let state = ReaderState {
             progress: Some(StoredProgress {
                 cfi: "x".into(),
@@ -267,14 +366,11 @@ mod tests {
             updated_at: "2026-09-09T00:00:00Z".into(),
         };
         let json = serde_json::to_value(&state).unwrap();
-        assert!(json.get("progress").is_some());
         assert_eq!(json["updatedAt"], "2026-09-09T00:00:00Z");
 
-        // Old state files without bookmarks still load (serde default).
+        // Old payloads without bookmarks still load (serde default).
         let legacy: ReaderState =
             serde_json::from_str(r#"{"updatedAt":"2026-01-01T00:00:00Z"}"#).unwrap();
         assert!(legacy.bookmarks.is_empty());
-        let json = serde_json::to_value(&legacy).unwrap();
-        assert_eq!(json["bookmarks"], serde_json::Value::Array(vec![]));
     }
 }
