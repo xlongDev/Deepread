@@ -1,4 +1,4 @@
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { convertFileSrc as tauriConvertFileSrc } from '@tauri-apps/api/core'
 import type { BookFormat } from '@deepread/reader-core'
 import type { LibraryBook } from '@deepread/shared'
 import { detectFormat } from '@deepread/reader-adapter'
@@ -26,6 +26,12 @@ export async function sha256Hex(file: File): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
+}
+
+/** convertFileSrc that degrades to the raw path outside a real Tauri runtime. */
+export function convertFileSrc(path: string): string {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return path
+  return tauriConvertFileSrc(path)
 }
 
 /** Library records open through the asset protocol, streamed from the original file. */

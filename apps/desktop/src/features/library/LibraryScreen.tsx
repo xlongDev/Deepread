@@ -10,13 +10,13 @@ import {
 } from '@phosphor-icons/react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
-import { convertFileSrc } from '@tauri-apps/api/core'
 import { toAppError, type AppInfo, type LibraryBook } from '@deepread/shared'
 import { extractCover } from '@deepread/reader-adapter'
 import {
   ACCEPTED_EXTENSIONS,
   DIALOG_EXTENSIONS,
   classifyFile,
+  convertFileSrc,
   openedBookFromLibrary,
   type ImportProblem,
   type OpenedBook,
