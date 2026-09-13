@@ -331,6 +331,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
   // RAG sections: adapter-built books expose their source directly; kernel
   // books fall back to a single section from the live contents.
   const [ragSections, setRagSections] = useState<readonly { label: string; text: string }[]>([])
+  const [sourceText, setSourceText] = useState<string | null>(null)
   useEffect(() => {
     if (!aiOpen) return
     const adapter = adapterRef.current
@@ -341,6 +342,7 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
         setAiContext(text.slice(0, 2000))
         const source = adapter.getSourceText()
         if (source !== null) {
+          setSourceText(source)
           setRagSections(chapterSections(source))
         } else {
           setRagSections([{ label: '原书正文', text: text.slice(0, 20_000) }])
@@ -983,6 +985,18 @@ export function ReaderScreen({ book, onBack }: ReaderScreenProps) {
           sections={ragSections}
           bookHash={book.hash}
           title={title}
+          sourceText={sourceText}
+          onReplaceSource={async (text) => {
+            const adapter = adapterRef.current
+            if (!adapter) return
+            await adapter.replaceSource(text)
+            const source = adapter.getSourceText()
+            if (source !== null) {
+              setSourceText(source)
+              setRagSections(chapterSections(source))
+            }
+            setToc(await adapter.getTableOfContents())
+          }}
           onClose={() => setAiOpen(false)}
         />
       )}

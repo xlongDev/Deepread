@@ -243,7 +243,7 @@ export interface AiIndexSetResponse {
 }
 
 /** Generic per-book AI artifact (summary/outline/notes/…), JSON value payload. */
-export type AiArtifactKind = 'summary' | 'outline' | 'notes'
+export type AiArtifactKind = 'summary' | 'outline' | 'notes' | 'characters'
 
 export interface AiArtifactGetRequest {
   readonly bookHash: string
@@ -553,7 +553,7 @@ export const aiIndexGetResponseSchema = z.object({ index: aiIndexPayloadSchema.n
 export const aiIndexSetRequestSchema = z.object({ bookHash, index: aiIndexPayloadSchema })
 export const aiIndexSetResponseSchema = z.object({ savedAt: iso8601 })
 
-export const artifactKindSchema = z.enum(['summary', 'outline', 'notes'])
+export const artifactKindSchema = z.enum(['summary', 'outline', 'notes', 'characters'])
 export const aiArtifactGetRequestSchema = z.object({
   bookHash,
   kind: artifactKindSchema,

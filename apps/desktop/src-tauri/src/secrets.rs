@@ -265,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "touches the real OS keychain: macOS pops an authorization dialog in automation"]
     fn set_secret_via_keyring_fallback_writes_file_when_no_service() {
         // The keyring entry constructor succeeds on most platforms; the
         // set/get may fail without a keychain service — either way the store

@@ -61,6 +61,32 @@ createServer((request, response) => {
   request.on('end', () => {
     const body = JSON.parse(Buffer.concat(bodyChunks).toString('utf8'))
     const systemText = (body.messages ?? []).find((m) => m.role === 'system')?.content ?? ''
+    if (systemText.includes('"corrections"')) {
+      const payload = JSON.stringify({
+        corrections: [{ find: '敲在青石板上', replace: '敲响了青石板', reason: '表达修正(模拟)' }],
+      })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+      return
+    }
+    if (systemText.includes('"characters"')) {
+      const payload = JSON.stringify({
+        characters: [
+          {
+            name: '守灯人',
+            aliases: ['老人'],
+            role: '主角',
+            description: '每年点灯候信的人(基于片段)',
+          },
+          { name: '孩子们', aliases: [], role: '路人', description: '数滴水的孩子们(基于片段)' },
+        ],
+      })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+      return
+    }
     if (systemText.includes('"overview"') || systemText.includes('"chapters"')) {
       // structured insight request: reply with valid JSON for zod validation
       const summary = {

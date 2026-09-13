@@ -18,10 +18,18 @@ import {
   type SummaryInsight,
 } from '@deepread/ai-core'
 import {
+  applyCorrections,
+  buildCharactersMessages,
+  buildRepairMessages,
+  charactersSchema,
   outlineInsightSchema,
+  parseCharacters,
+  parseCorrections,
   parseOutlineInsight,
   parseSummaryInsight,
   summaryInsightSchema,
+  type AiCorrection,
+  type CharactersPayload,
 } from '@deepread/ai-core'
 import { invokeCommand, invokeStreamingCommand, isTauriRuntime } from '../../lib/ipc'
 
@@ -34,6 +42,9 @@ interface AiDrawerProps {
   readonly sections: readonly { readonly label: string; readonly text: string }[]
   readonly bookHash: string
   readonly title: string
+  /** Raw adapter-built source text (TXT/MD); null for kernel books. */
+  readonly sourceText: string | null
+  readonly onReplaceSource: (text: string) => Promise<void>
   readonly onClose: () => void
 }
 
@@ -60,6 +71,8 @@ export function AiDrawer({
   sections,
   bookHash,
   title,
+  sourceText,
+  onReplaceSource,
   onClose,
 }: AiDrawerProps) {
   const [providers, setProviders] = useState<readonly AiProviderConfig[]>([])
@@ -83,6 +96,11 @@ export function AiDrawer({
   const [summary, setSummary] = useState<SummaryInsight | null>(null)
   const [outline, setOutline] = useState<OutlineInsight | null>(null)
   const [insightPhase, setInsightPhase] = useState<'idle' | 'streaming'>('idle')
+  const [characters, setCharacters] = useState<CharactersPayload | null>(null)
+  const [aiCorrections, setAiCorrections] = useState<{
+    proposals: readonly AiCorrection[]
+    accepted: ReadonlySet<string>
+  } | null>(null)
   // Browser (non-Tauri) sessions keep the index and insights in memory;
   // Tauri persists them per book hash via IPC (Rust, covered by its tests).
   const browserIndexRef = useRef<AiIndexPayload | null>(null)
@@ -211,7 +229,7 @@ export function AiDrawer({
   // Load persisted insights once per drawer open.
   useEffect(() => {
     let cancelled = false
-    for (const kind of ['summary', 'outline'] as const) {
+    for (const kind of ['summary', 'outline', 'characters'] as const) {
       const read = isTauriRuntime()
         ? invokeCommand('ai.artifact.get', { bookHash, kind }).then((response) =>
             response.payload === null
@@ -223,7 +241,8 @@ export function AiDrawer({
         .then((stored) => {
           if (cancelled || stored === null) return
           if (kind === 'summary') setSummary(summaryInsightSchema.parse(stored.payload))
-          else setOutline(outlineInsightSchema.parse(stored.payload))
+          else if (kind === 'outline') setOutline(outlineInsightSchema.parse(stored.payload))
+          else setCharacters(charactersSchema.parse(stored.payload))
         })
         .catch(() => {
           // Corrupted/stale artifacts are ignored; regeneration overwrites.
@@ -233,6 +252,55 @@ export function AiDrawer({
       cancelled = true
     }
   }, [bookHash])
+
+  // Shared streaming helper: run messages through Tauri proxy or mock, return
+  // the full model text.
+  const streamChatText = useCallback(
+    async (
+      chatMessages: readonly {
+        role: 'system' | 'user' | 'assistant'
+        content: string
+      }[],
+    ): Promise<string> => {
+      let full = ''
+      const parser = createSseParser((data) => {
+        const delta = extractDelta(data)
+        if (delta.type === 'delta') full += delta.text
+      })
+      if (isTauriRuntime() && activeId) {
+        const taskId = `task-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
+        await invokeStreamingCommand(
+          'ai.chat',
+          { taskId, configId: activeId, messages: chatMessages },
+          (event) => {
+            if (event.type === 'chunk') parser.push(event.data)
+          },
+        )
+      } else {
+        const response = await fetch(chatEndpoint('/mock-ai/v1'), {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: 'Bearer sk-mock-test-key',
+          },
+          body: buildChatBody({ model: 'mock-model', messages: chatMessages }),
+        })
+        if (!response.ok || !response.body) {
+          throw new Error(`mock 服务错误(${response.status})`)
+        }
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          parser.push(decoder.decode(value, { stream: true }))
+        }
+      }
+      parser.end()
+      return full
+    },
+    [activeId],
+  )
 
   // Generate a structured insight via the streaming chat path; validates the
   // assembled JSON with zod before persisting (spec §118).
@@ -308,6 +376,80 @@ export function AiDrawer({
     },
     [activeId, bookHash, insightPhase, sections, title],
   )
+
+  const runAiRepair = useCallback(async (): Promise<void> => {
+    if (sourceText === null || insightPhase === 'streaming') return
+    setInsightPhase('streaming')
+    setError(null)
+    try {
+      const full = await streamChatText(buildRepairMessages(sourceText.slice(0, 6000), title))
+      const proposals = parseCorrections(full, sourceText)
+      if (proposals.length === 0) {
+        setError('AI 没有找到可确信的纠错点。')
+        setAiCorrections(null)
+        return
+      }
+      setAiCorrections({
+        proposals,
+        accepted: new Set(proposals.filter((p) => p.occurrences === 1).map((p) => p.id)),
+      })
+    } catch (repairError) {
+      setError(toAppError(repairError).message)
+    } finally {
+      setInsightPhase('idle')
+    }
+  }, [insightPhase, sourceText, streamChatText, title])
+
+  const toggleAiCorrection = (id: string): void => {
+    setAiCorrections((current) => {
+      if (!current) return current
+      const accepted = new Set(current.accepted)
+      if (accepted.has(id)) accepted.delete(id)
+      else accepted.add(id)
+      return { ...current, accepted }
+    })
+  }
+
+  const applyAiCorrectionsAccepted = async (): Promise<void> => {
+    const review = aiCorrections
+    if (!review || sourceText === null) return
+    const result = applyCorrections(sourceText, review.proposals, [...review.accepted])
+    await onReplaceSource(result.text)
+    setAiCorrections(null)
+    setError(
+      result.skipped > 0
+        ? `已应用 ${result.applied} 处,跳过 ${result.skipped} 处(命中不再唯一)。`
+        : null,
+    )
+  }
+
+  const generateCharacters = useCallback(async (): Promise<void> => {
+    if (insightPhase === 'streaming' || sections.length === 0) return
+    setInsightPhase('streaming')
+    setError(null)
+    try {
+      const full = await streamChatText(buildCharactersMessages(sections, title))
+      const payload = parseCharacters(full)
+      const artifactPayload = payload as unknown as Record<string, unknown>
+      if (isTauriRuntime()) {
+        await invokeCommand('ai.artifact.set', {
+          bookHash,
+          kind: 'characters',
+          payload: artifactPayload,
+        })
+      } else {
+        browserArtifactsRef.current.set(`${bookHash}-characters`, {
+          payload: artifactPayload,
+          createdAt: new Date().toISOString(),
+        })
+      }
+      setCharacters(payload)
+    } catch (charactersError) {
+      setError(toAppError(charactersError).message)
+    } finally {
+      setInsightPhase('idle')
+    }
+  }, [bookHash, insightPhase, sections, streamChatText, title])
 
   const send = useCallback(async (): Promise<void> => {
     const question = input.trim()
@@ -678,13 +820,66 @@ export function AiDrawer({
             <p className="ai-privacy">{summary.coverage}</p>
           </div>
         )}
-        {outline !== null && (
+        {characters !== null && (
           <div className="ai-insight">
-            {outline.chapters.map((chapter) => (
-              <p key={chapter.title} className="ai-insight-outline">
-                <strong>{chapter.title}</strong> {chapter.gist}
+            {characters.characters.map((character) => (
+              <p key={character.name} className="ai-insight-outline">
+                <strong>{character.name}</strong>
+                <span className="ai-citation">{character.role}</span> {character.description}
               </p>
             ))}
+          </div>
+        )}
+        <div className="segmented">
+          <button
+            type="button"
+            onClick={() => void generateCharacters()}
+            disabled={insightPhase === 'streaming'}
+          >
+            {characters === null ? '抽取角色' : '重新抽取角色'}
+          </button>
+        </div>
+        {sourceText !== null && (
+          <div className="settings-row">
+            <span className="settings-label">AI 纠错</span>
+            <div className="segmented">
+              <button
+                type="button"
+                onClick={() => void runAiRepair()}
+                disabled={insightPhase === 'streaming'}
+              >
+                {insightPhase === 'streaming' ? '检查中…' : 'AI 检查'}
+              </button>
+            </div>
+          </div>
+        )}
+        {aiCorrections !== null && (
+          <div className="ai-insight">
+            {aiCorrections.proposals.map((proposal) => (
+              <label
+                key={proposal.id}
+                className="repair-item"
+                aria-label={`应用纠错:${proposal.reason}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={aiCorrections.accepted.has(proposal.id)}
+                  onChange={() => toggleAiCorrection(proposal.id)}
+                />
+                <span className="repair-body">
+                  <span className="repair-rule">{proposal.reason}</span>
+                  <s className="repair-before">{proposal.find}</s>
+                  <span className="repair-after">{proposal.replace}</span>
+                </span>
+              </label>
+            ))}
+            <button
+              type="button"
+              className="reader-error-button"
+              onClick={() => void applyAiCorrectionsAccepted()}
+            >
+              应用已选({aiCorrections.accepted.size}/{aiCorrections.proposals.length})
+            </button>
           </div>
         )}
       </section>
