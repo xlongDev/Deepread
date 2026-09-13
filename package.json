@@ -21,7 +21,8 @@
     "cargo:test": "cargo test --workspace",
     "cargo:fmt": "cargo fmt --all",
     "cargo:clippy": "cargo clippy --workspace --all-targets -- -D warnings",
-    "fixtures": "bash scripts/make-fixtures.sh"
+    "fixtures": "bash scripts/make-fixtures.sh",
+    "postinstall": "node scripts/copy-pdfjs-assets.mjs"
   },
   "devDependencies": {
     "oxlint": "1.82.0",

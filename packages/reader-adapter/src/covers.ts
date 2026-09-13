@@ -93,7 +93,7 @@ export async function extractMobiCover(url: string): Promise<string | null> {
   }
 }
 
-/** Render PDF page 1 to a small canvas and return it as an object URL. */
+/** Render the first non-blank PDF page (max 3) and return it as an object URL. */
 export async function extractPdfCover(url: string): Promise<string | null> {
   try {
     const pdfjs = await import('pdfjs-dist')
@@ -110,21 +110,52 @@ export async function extractPdfCover(url: string): Promise<string | null> {
       cMapPacked: true,
       standardFontDataUrl: '/pdfjs/standard_fonts/',
     }).promise
-    const page = await pdf.getPage(1)
-    const baseViewport = page.getViewport({ scale: 1 })
-    const scale = 480 / baseViewport.height
-    const viewport = page.getViewport({ scale })
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.ceil(viewport.width)
-    canvas.height = Math.ceil(viewport.height)
-    const context = canvas.getContext('2d')
-    if (!context) return null
-    await page.render({ canvasContext: context, viewport, canvas }).promise
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve))
-    return blob ? URL.createObjectURL(blob) : null
+    const pagesToTry = Math.min(3, pdf.numPages)
+    for (let pageNumber = 1; pageNumber <= pagesToTry; pageNumber++) {
+      const page = await pdf.getPage(pageNumber)
+      const baseViewport = page.getViewport({ scale: 1 })
+      const scale = 480 / baseViewport.height
+      const viewport = page.getViewport({ scale })
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.ceil(viewport.width)
+      canvas.height = Math.ceil(viewport.height)
+      const context = canvas.getContext('2d')
+      if (!context) return null
+      context.fillStyle = '#ffffff'
+      context.fillRect(0, 0, canvas.width, canvas.height)
+      await page.render({ canvasContext: context, viewport, canvas }).promise
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve))
+      if (!blob) return null
+      // A real cover is never blank; some PDFs open with an empty page
+      // before the actual cover, so skip those and keep looking.
+      if (!(await isCanvasBlank(context, canvas.width, canvas.height))) {
+        return URL.createObjectURL(blob)
+      }
+    }
+    return null
   } catch {
     return null
   }
+}
+
+/** True when >99.5% of sampled pixels are near-white. */
+async function isCanvasBlank(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): Promise<boolean> {
+  const { data } = context.getImageData(0, 0, width, height)
+  const stride = Math.max(1, Math.floor(data.length / 4 / 400)) // ~400 samples
+  let sampled = 0
+  let nonWhite = 0
+  for (let i = 0; i < data.length; i += 4 * stride) {
+    sampled++
+    const r = data[i] ?? 255
+    const g = data[i + 1] ?? 255
+    const b = data[i + 2] ?? 255
+    if (r < 245 || g < 245 || b < 245) nonWhite++
+  }
+  return sampled === 0 || nonWhite / sampled < 0.005
 }
 
 /** Extract a cover URL for a book; null means "draw the generated cover". */
